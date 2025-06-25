@@ -6,6 +6,8 @@
 - Added official mime types for CBZ/CBR comic books to desktop
   metadata file.
 
+- Fix "context has already been set" error.
+
 # MComix 3.1.0
 ## Release date: 2024-01-21
 
