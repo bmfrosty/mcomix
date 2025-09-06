@@ -1,12 +1,12 @@
 # MComix 3.1.1
-## In development
+## Release date: 2025-09-06
 
 ### Bug fixes
 
 - Added official mime types for CBZ/CBR comic books to desktop
   metadata file.
 
-- Fix "context has already been set" error.
+- Fix "context has already been set" error in Python 3.13.
 
 # MComix 3.1.0
 ## Release date: 2024-01-21
