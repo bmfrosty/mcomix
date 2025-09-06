@@ -26,7 +26,7 @@
           <Component Id='ProgramShortcuts.c'>
             <Shortcut Id='MComix.exe.s' Name='MComix'
               Description='MComix is a user-friendly, customizable image viewer.'
-              Target='[!MComix.exe.f]'
+              Target='[!MComix_exe.f]'
               WorkingDirectory='INSTALLDIR' />
             <Shortcut Id='Uninstall.s' Name='Uninstall MComix'
               Description='Uninstalls MComix.'
