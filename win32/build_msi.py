@@ -79,13 +79,15 @@ def generate_id_from_string(
         pathparts
     )  # Assuming a single char separator between each part
     suffix = generate_id_suffix(idtype)
-    avail_remaining_length = MAX_ID_LENGTH - dirpart_length - len(suffix)
+    # If !isalpha() for the first letter, an additional underscore is prepended.
+    # So account for one more than normally needed
+    avail_remaining_length = MAX_ID_LENGTH - dirpart_length - len(suffix) - 1
     # Take the full filename
     pathparts.append(relative_path.name[-avail_remaining_length:])
 
-    safetext = re.sub(r"[-/\\@+]", "_", "_".join(pathparts))
+    safetext = re.sub(r"[ -/\\@+]", "_", "_".join(pathparts))
 
-    if not safetext[0].isalpha():
+    if not (safetext[0].isalpha() or safetext[0] == '_'):
         safetext = "_" + safetext
 
     return safetext + suffix
