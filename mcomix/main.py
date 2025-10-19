@@ -266,6 +266,8 @@ class MainWindow(Gtk.Window):
             self._event_handler.drag_n_drop_event)
 
         self.uimanager.set_sensitivities()
+        # Restore twice, before and after show(), to make sure it works...
+        self.restore_window_geometry()
         self.show()
         self.restore_window_geometry()
 
