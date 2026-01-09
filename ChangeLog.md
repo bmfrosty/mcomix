@@ -1,3 +1,11 @@
+# MComix 3.1.2
+## In development
+
+### Bug fixes
+
+- Adapt keybinding handling to changed API of Gtk.accelerator_parse
+  in newer versions of Gtk. This fixes broken keybindings.
+
 # MComix 3.1.1
 ## Release date: 2025-09-06
 
