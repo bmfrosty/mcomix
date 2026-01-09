@@ -8,14 +8,14 @@ import sys
 from mcomix import tools
 
 APPNAME = 'MComix'
-VERSION = '3.1.2-dev0'
+VERSION = '3.2.0-dev0'
 
 HOME_DIR = tools.get_home_directory()
 CONFIG_DIR = tools.get_config_directory()
 DATA_DIR = tools.get_data_directory()
 
 BASE_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-THUMBNAIL_PATH = os.path.join(HOME_DIR if sys.platform != 'win32' else DATA_DIR, '.thumbnails/normal')
+THUMBNAIL_PATH = tools.get_thumbnail_directory()
 LIBRARY_DATABASE_PATH = os.path.join(DATA_DIR, 'library.db')
 LASTPAGE_DATABASE_PATH = os.path.join(DATA_DIR, 'lastreadpage.db')
 LIBRARY_COVERS_PATH = os.path.join(DATA_DIR, 'library_covers')

@@ -114,6 +114,22 @@ def get_data_directory() -> str:
         return os.path.join(base_path, 'mcomix')
 
 
+def get_thumbnail_directory() -> str:
+    """Return the path to the MComix thumbnail directory. On UNIX, this will
+    be in $XDG_CACHE_HOME. On Windows, DATA_DIR will be used. Refer to
+    https://specifications.freedesktop.org/thumbnail/latest/directory.html
+    for more information.
+    """
+    if sys.platform == 'win32':
+        cache_dir = os.path.join(get_data_directory(), '.thumbnails')
+    else:
+        cache_dir = os.getenv('XDG_CACHE_HOME',
+                              os.path.join(get_home_directory(), '.cache'))
+        cache_dir = os.path.join(cache_dir, 'thumbnails')
+
+    return os.path.join(cache_dir, 'normal')
+
+
 def number_of_digits(n: int) -> int:
     if 0 == n:
         return 1

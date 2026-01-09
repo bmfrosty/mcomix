@@ -1,10 +1,18 @@
-# MComix 3.1.2
+# MComix 3.2.0
 ## In development
 
 ### Bug fixes
 
 - Adapt keybinding handling to changed API of Gtk.accelerator_parse
   in newer versions of Gtk. This fixes broken keybindings.
+
+### Features
+
+- MComix now respects the XDG Thumbnail Directory specification (again),
+  and will store thumbnails relative to XDG_CACHE_HOME instead of
+  relative to the home directory on UNIX systems. Nothing changes
+  on Windows. Note: Existing thumbnails in the former cache directory
+  ($HOME/.thumbnails) are not moved automatically by this update.
 
 # MComix 3.1.1
 ## Release date: 2025-09-06
