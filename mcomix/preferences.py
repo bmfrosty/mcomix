@@ -113,6 +113,7 @@ prefs = {
     'animation mode': constants.ANIMATION_NORMAL,
     'double page autoresize': constants.DOUBLE_PAGE_AUTORESIZE_SIZE,
     'space between two pages': 2,
+    'continuous scroll': False,
 }
 
 
