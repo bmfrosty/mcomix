@@ -511,6 +511,8 @@ class EventHandler(object):
                 self._scroll_with_flipping(0, prefs['number of pixels to scroll per mouse wheel event'])
 
         elif direction == Gdk.ScrollDirection.RIGHT:
+            # Horizontal scroll is a no-op in continuous scroll mode (vertical
+            # strip only). Manga mode logic below is unchanged from original.
             if prefs['continuous scroll']:
                 pass
             elif not self._window.is_manga_mode:
@@ -644,6 +646,9 @@ class EventHandler(object):
         to.
         """
 
+        # In continuous scroll mode the strip handles all vertical movement.
+        # If the strip can't scroll further and includes the first/last archive
+        # page, cross the archive boundary instead of flipping a page.
         if prefs['continuous scroll']:
             self._scroll_protection = True
             if self._window.scroll(x, y):
@@ -651,6 +656,8 @@ class EventHandler(object):
                 return True
             strip = self._window._continuous_strip_pages
             n_total = self._window.imagehandler.get_number_of_pages()
+            # Manga mode reverses horizontal direction; vertical (y) is always
+            # the primary scroll axis. This mirrors the non-continuous path below.
             if (y > 0 or (not self._window.is_manga_mode and x > 0)
                     or (self._window.is_manga_mode and x < 0)):
                 if strip and strip[-1] >= n_total:
@@ -699,6 +706,9 @@ class EventHandler(object):
         self._smart_scrolling(small_step, True)
 
     def _smart_scrolling(self, small_step, backwards):
+        # In continuous scroll mode, smart scroll is just a vertical scroll by
+        # a percentage of the viewport. Archive crossing works the same way as
+        # in _scroll_with_flipping: attempt scroll, then cross boundary if at end.
         if prefs['continuous scroll']:
             self._scroll_protection = True
             viewport_size = self._window.get_visible_area_size()

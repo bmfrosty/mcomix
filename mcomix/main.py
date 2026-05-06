@@ -395,6 +395,9 @@ class MainWindow(Gtk.Window):
 
         self.osd.clear()
 
+        # _continuous_adjusting suppresses _on_continuous_scroll for the
+        # duration of the render, including the synchronous value-changed that
+        # GTK fires inside set_size() before _continuous_strip_pages is updated.
         if prefs['continuous scroll']:
             self._continuous_adjusting = True
             result = self._draw_image_continuous(scroll_to)
@@ -592,6 +595,10 @@ class MainWindow(Gtk.Window):
 
     def _page_available(self, page):
         """ Called whenever a new page is ready for displaying. """
+        # In continuous scroll mode, redraw whenever any page in the visible
+        # strip becomes ready, not just the current page. The empty-strip
+        # fallback handles the first page of a newly opened archive before
+        # the strip has been built.
         if prefs['continuous scroll']:
             current_page = self.imagehandler.get_current_page()
             if page in self._continuous_strip_pages or (
@@ -610,6 +617,9 @@ class MainWindow(Gtk.Window):
             self.update_icon(False)
 
     def _on_file_opened(self):
+        # Reset the strip on every archive open. Scroll destination is set from
+        # _continuous_archive_direction so that crossing into a previous archive
+        # lands at the bottom rather than the top.
         if prefs['continuous scroll']:
             self._continuous_strip_pages = []
             self._continuous_y_offsets = []
@@ -779,6 +789,10 @@ class MainWindow(Gtk.Window):
         self.draw_image()
 
     def change_continuous_scroll(self, toggleaction):
+        # Wire or unwire the vadjust signal that drives the continuous strip.
+        # Double-page mode is incompatible, so disable it when enabling this.
+        # Clearing the strip on disable prevents stale scroll events from firing
+        # against old strip data after the next draw_image uses the normal path.
         prefs['continuous scroll'] = toggleaction.get_active()
         if prefs['continuous scroll']:
             self.actiongroup.get_action('double_page').set_active(False)
@@ -819,11 +833,15 @@ class MainWindow(Gtk.Window):
             self._show_scrollbars([False, False])
             return False
 
+        # Build the page range: _CONTINUOUS_BEFORE pages before current,
+        # _CONTINUOUS_AFTER pages after, clamped to archive bounds.
         first_page = max(1, current_page - _CONTINUOUS_BEFORE)
         last_page = min(n_total, current_page + _CONTINUOUS_AFTER)
         strip_pages = list(range(first_page, last_page + 1))
         n_strip = len(strip_pages)
 
+        # Grow the image widget pool on demand; widgets are never removed,
+        # just hidden, to avoid GTK allocation churn.
         while len(self.images) < n_strip:
             img = Gtk.Image()
             self._main_layout.put(img, 0, 0)
@@ -834,6 +852,8 @@ class MainWindow(Gtk.Window):
             vis_width = 1
         if vis_height <= 0:
             vis_height = 1
+        # Scale every page to the same width: half the viewport height.
+        # This keeps the strip readable without filling the screen horizontally.
         target_width = max(1, vis_height // 2)
 
         scaled_pixbufs = []
@@ -842,6 +862,7 @@ class MainWindow(Gtk.Window):
         orig_sizes = []
         y = 0
 
+        # Scale and transform each page, recording y positions as we go.
         for i, page in enumerate(strip_pages):
             if self.imagehandler.page_is_available(page):
                 pixbuf = self.imagehandler._get_pixbuf(page - 1)
@@ -883,9 +904,14 @@ class MainWindow(Gtk.Window):
 
         total_height = max(1, y) if n_strip > 0 else 1
 
+        # freeze_updates / thaw_updates suppresses GTK redraws while we
+        # reposition widgets, preventing visible tearing. Note: it does NOT
+        # suppress signal emission, so value-changed can still fire during
+        # set_size(); _continuous_adjusting guards against that.
         self._main_layout.get_bin_window().freeze_updates()
         self._main_layout.set_size(vis_width, total_height)
 
+        # Centre each image horizontally; hide unused pool widgets.
         for i in range(n_strip):
             actual_w = scaled_pixbufs[i].get_width()
             x_off = max(0, (vis_width - actual_w) // 2)
@@ -897,6 +923,7 @@ class MainWindow(Gtk.Window):
 
         self._show_scrollbars([False, True])
 
+        # Update statusbar with the scale of the current page.
         if current_page in strip_pages:
             curr_idx = strip_pages.index(current_page)
             ow, oh = orig_sizes[curr_idx]
@@ -908,10 +935,13 @@ class MainWindow(Gtk.Window):
         self.statusbar.update()
         self.update_title()
 
+        # Commit the new strip geometry so _on_continuous_scroll sees fresh data.
         self._continuous_strip_pages = strip_pages
         self._continuous_y_offsets = y_offsets
         self._continuous_scaled_heights = scaled_heights
 
+        # Scroll to the requested position within the current page.
+        # SCROLL_TO_END shows the bottom edge; anything else shows the top.
         if scroll_to is not None:
             current_idx = strip_pages.index(current_page) if current_page in strip_pages else 0
             current_y = y_offsets[current_idx]
@@ -934,6 +964,9 @@ class MainWindow(Gtk.Window):
 
     def _on_continuous_scroll(self, adjustment):
         """Called when the viewport scrolls in continuous scroll mode."""
+        # _continuous_adjusting is True while we are programmatically moving
+        # the scroll position (strip rebuild, set_value, etc.).  Ignore those
+        # events to avoid re-entrant strip updates.
         if self._continuous_adjusting or not self._continuous_strip_pages:
             return
         if not prefs['continuous scroll']:
@@ -942,6 +975,8 @@ class MainWindow(Gtk.Window):
         scroll_y = adjustment.get_value()
         vis_height = self.get_visible_area_size()[1]
 
+        # Determine which page occupies the top of the viewport: the last page
+        # whose y_offset is at or above the current scroll position.
         visible_page = self._continuous_strip_pages[0]
         for i, page in enumerate(self._continuous_strip_pages):
             if scroll_y >= self._continuous_y_offsets[i]:
@@ -951,6 +986,9 @@ class MainWindow(Gtk.Window):
         last_in_strip = self._continuous_strip_pages[-1]
         n_total = self.imagehandler.get_number_of_pages()
 
+        # Keep current_page in sync with what the user is actually looking at.
+        # _continuous_adjusting suppresses the value-changed re-entry that
+        # do_cacheing / page_changed may indirectly trigger.
         current_page = self.imagehandler.get_current_page()
         if visible_page != current_page:
             self._continuous_adjusting = True
@@ -960,6 +998,11 @@ class MainWindow(Gtk.Window):
             self.page_changed()
             self._continuous_adjusting = False
 
+        # Extend the strip when the viewport is approaching either edge.
+        # Lower edge: viewport bottom is past the start of the last strip page
+        # and there are more archive pages to append.
+        # Upper edge: viewport top is within the first strip page and there are
+        # archive pages to prepend.
         viewport_bottom = scroll_y + vis_height
         last_page_top = self._continuous_y_offsets[-1]
         if (viewport_bottom >= last_page_top and last_in_strip < n_total
@@ -979,10 +1022,10 @@ class MainWindow(Gtk.Window):
     def _do_extend_strip(self):
         """Re-render the continuous strip, preserving exactly what's at the viewport top."""
         # Snapshot the viewport-top reference BEFORE re-rendering.
-        # We find which page is at the top of the viewport and how far into
-        # it the scroll position is.  After the strip changes we restore that
-        # same content to the same screen position, regardless of how much
-        # current_page may have drifted since _schedule_strip_extend() was called.
+        # We record which page is at the top of the viewport and how many pixels
+        # into that page the scroll position sits.  After the strip is rebuilt we
+        # restore that same content to the same screen position, regardless of how
+        # much current_page may have drifted since _schedule_strip_extend() fired.
         old_vadjust = self._vadjust.get_value()
         ref_page = None
         ref_offset = old_vadjust
@@ -994,9 +1037,13 @@ class MainWindow(Gtk.Window):
                     ref_page = page
                     ref_offset = old_vadjust - self._continuous_y_offsets[i]
 
+        # Hold _continuous_adjusting so that the set_size() call inside
+        # _draw_image_continuous doesn't fire _on_continuous_scroll re-entrantly.
         self._continuous_adjusting = True
         self._draw_image_continuous(None)
 
+        # Restore scroll so the reference page stays at the same screen position.
+        # If ref_page is no longer in the new strip (edge case), leave scroll as-is.
         if ref_page is not None and ref_page in self._continuous_strip_pages:
             ref_idx = self._continuous_strip_pages.index(ref_page)
             new_vadjust = self._continuous_y_offsets[ref_idx] + ref_offset
