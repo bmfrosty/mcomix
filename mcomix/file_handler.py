@@ -63,6 +63,8 @@ class FileHandler(object):
         self._condition = None
         #: Provides a list of available files/archives in the open directory.
         self._file_provider = None
+        #: Temp dir for files downloaded from non-local URIs.
+        self._net_tmp_dir = None
         #: Keeps track of the last read page in archives
         self.last_read_page = last_read_page.LastReadPage(backend.LibraryBackend())
         #: Regexp used for determining which archive files are comment files.
@@ -70,6 +72,37 @@ class FileHandler(object):
         self.update_comment_extensions()
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
+
+    def _resolve_uri(self, path):
+        """Resolve a path or list of paths that may be URIs to local paths.
+
+        For GIO locations that have a local POSIX mount (e.g. GVFS smb
+        mounts under /run/user/*/gvfs/…) the local path is returned directly.
+        For truly non-local URIs the file is copied to a per-open temp dir
+        so the rest of the pipeline can work on a normal local path.
+
+        Returns the same structure (string or list) as was passed in.
+        """
+        if isinstance(path, list):
+            return [self._resolve_uri(p) for p in path]
+        if '://' not in path:
+            return path
+        from gi.repository import Gio
+        gfile = Gio.File.new_for_uri(path)
+        local = gfile.get_path()
+        if local:
+            return local
+        # No POSIX path — download to a managed temp directory.
+        if self._net_tmp_dir is None:
+            self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
+        basename = gfile.get_basename() or 'mcomix_net_file'
+        tmp_path = os.path.join(self._net_tmp_dir, basename)
+        dest = Gio.File.new_for_path(tmp_path)
+        try:
+            gfile.copy(dest, Gio.FileCopyFlags.OVERWRITE, None, None, None)
+        except Exception as ex:
+            raise IOError(_('Could not copy remote file "%s": %s') % (path, str(ex)))
+        return tmp_path
 
     def refresh_file(self, *args, **kwargs):
         """ Closes the current file(s)/archive and reloads them. """
@@ -93,6 +126,15 @@ class FileHandler(object):
         """
 
         self._close()
+
+        # Convert any URI strings (e.g. smb://) to local POSIX paths before the
+        # rest of the pipeline, which assumes os.path-compatible strings throughout.
+        try:
+            path = self._resolve_uri(path)
+        except IOError as ex:
+            self._window.statusbar.set_message(str(ex))
+            self._window.osd.show(str(ex))
+            return False
 
         try:
             path = self._initialize_fileprovider(path, keep_fileprovider)
@@ -222,6 +264,10 @@ class FileHandler(object):
         if self._tmp_dir is not None:
             self.thread_delete(self._tmp_dir)
             self._tmp_dir = None
+        # Clean up any file copied from a non-local URI (see _resolve_uri).
+        if self._net_tmp_dir is not None:
+            self.thread_delete(self._net_tmp_dir)
+            self._net_tmp_dir = None
 
     def _initialize_fileprovider(self, path, keep_fileprovider):
         """ Creates the L{file_provider.FileProvider} for C{path}.

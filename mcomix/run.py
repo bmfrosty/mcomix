@@ -167,6 +167,14 @@ def run():
     if opts.language_code:
         i18n.install_gettext(opts.language_code)
 
+    # Tell GTK3 to use the xdg-desktop-portal file chooser so that
+    # Gtk.FileChooserNative gets the full-featured portal dialog (which
+    # supports network/SMB locations) even outside a Flatpak sandbox.
+    # Must be set before setup_dependencies() imports GTK and before any
+    # FileChooserNative is instantiated, because GDK caches the result.
+    if 'GTK_USE_PORTAL' not in os.environ:
+        os.environ['GTK_USE_PORTAL'] = '1'
+
     setup_dependencies()
 
     from gi.repository import Gdk, GLib, Gtk
