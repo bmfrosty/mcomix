@@ -1,0 +1,161 @@
+app-id: org.catbus.mcomix
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.llvm21
+rename-icon: mcomix
+rename-desktop-file: mcomix.desktop
+rename-appdata-file: mcomix.metainfo.xml
+command: mcomix
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --env=TMPDIR=/var/tmp
+  # Network filesystem access via the file chooser portal (SMB, SFTP, etc.)
+  - --talk-name=org.freedesktop.portal.FileChooser
+  # Local filesystem access for the built-in file chooser fallback
+  - --filesystem=xdg-documents
+  - --filesystem=xdg-download
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-desktop
+  - --filesystem=/media
+  - --filesystem=/run/media
+
+cleanup:
+  - /share/man
+
+modules:
+  - name: 7-zip
+    buildsystem: simple
+    build-commands:
+      - |
+        for bundle in Alone2 SFXCon; do
+          pushd CPP/7zip/Bundles/${bundle}
+          make -j ${FLATPAK_BUILDER_N_JOBS} -f ../../cmpl_gcc.mak
+          popd
+        done
+      - install -Dm755 CPP/7zip/Bundles/Alone2/b/g/7zz   $FLATPAK_DEST/bin/7z
+      - install -Dm755 CPP/7zip/Bundles/SFXCon/b/g/7zCon $FLATPAK_DEST/bin/7zCon.sfx
+    sources:
+      - type: git
+        url: https://github.com/ip7z/7zip.git
+        tag: '26.01'
+        commit: 8c63d71ff886bda90c86db28466287f977374237
+
+  - name: unrar
+    no-autogen: true
+    build-options:
+      strip: true
+    make-install-args:
+      - DESTDIR=$(FLATPAK_DEST)
+    sources:
+      - type: archive
+        url: https://www.rarlab.com/rar/unrarsrc-5.8.3.tar.gz
+        sha256: 3591685c8f5bbcb0be09de3d0a0544adb88966b9cccb80986f6cd2b534fd91a6
+
+  - name: mcomix
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --prefix=${FLATPAK_DEST}
+        --no-build-isolation .[fileformats]
+      - cp -a share -t /app/
+      - |
+        resize=$PWD/resize.py
+        cd $FLATPAK_DEST/share/icons/hicolor
+        for x in $(ls);do
+          [ -e ${x}/apps/mcomix.png ] || continue
+          size=${x%x*}
+          python ${resize} -s ${size} ${x}/apps/mcomix.png
+          echo ${size}_ok
+        done
+        rm */apps/*.svg
+    sources:
+      - type: git
+        url: https://github.com/bmfrosty/mcomix.git
+        branch: main
+
+      - type: shell
+        commands:
+          # Patch the app name to match the Flatpak app ID so that
+          # set_prgname() / set_program_class() use the right identifier.
+          - sed -i "s:constants.APPNAME:'${FLATPAK_ID}':g" ./mcomix/run.py
+
+      - type: script
+        dest-filename: resize.py
+        commands:
+          - |
+            from PIL import Image
+            from pathlib import Path
+            import argparse
+
+            parser = argparse.ArgumentParser()
+            parser.add_argument("-s", type=str,metavar='size',required=True)
+            parser.add_argument("path", type=str)
+
+            args = vars(parser.parse_args())
+            size: int = int(args['s'])
+            path: Path = Path(args['path'])
+
+            fin_img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            img = Image.open(path)
+            in_w,in_h = img.size
+            rate = in_w / in_h
+            w = int(size if rate > 1 else size*rate)
+            h = int(size if rate <= 1 else size/rate)
+            img = img.resize((w,h), Image.Resampling.LANCZOS)
+            fin_img.paste(img, (int((size-w)/2), int((size-h)/2)))
+            fin_img.save(path)
+
+    modules:
+      - pymupdf.yml
+      - buildbackend.yml
+      - name: python3-pygobject
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "pycairo" --no-build-isolation
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "pygobject" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/22/d9/1728840a22a4ef8a8f479b9156aa2943cd98c3907accd3849fb0d5f82bfd/pycairo-1.29.0.tar.gz
+            sha256: f3f7fde97325cae80224c09f12564ef58d0d0f655da0e3b040f5807bd5bd3142
+          - type: file
+            url: https://files.pythonhosted.org/packages/a2/80/09247a2be28af2c2240132a0af6c1005a2b1d089242b13a2cd782d2de8d7/pygobject-3.56.2.tar.gz
+            sha256: b816098969544081de9eecedb94ad6ac59c77e4d571fe7051f18bebcec074313
+
+      - name: python3-pybind11
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "pybind11" --no-build-isolation
+        cleanup:
+          - '*'
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/b3/06/c3a23c9a0263b136c519f033a58d4641e73065fefc7754e9667ec206d992/pybind11-3.0.4-py3-none-any.whl
+            sha256: 961720ee652da51d531b7b2451a6bd2bc042b0106e6d9baa48ecb7d58034ce63
+
+      - name: python3-Pillow
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "Pillow" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/8c/21/c2bcdd5906101a30244eaffc1b6e6ce71a31bd0742a01eb89e660ebfac2d/pillow-12.2.0.tar.gz
+            sha256: a830b1a40919539d07806aa58e1b114df53ddd43213d9c8b75847eee6c0182b5
+
+      - name: python3-chardet
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "chardet" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/8c/6c/0a40afdb50a0fe041ab95553b835a8160b6cf0e81edf2ae2fe9f5224cbf9/chardet-7.4.3-py3-none-any.whl
+            sha256: 1173b74051570cf08099d7429d92e4882d375ad4217f92a6e5240ccfb26f231e
