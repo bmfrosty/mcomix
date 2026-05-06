@@ -1,4 +1,5 @@
 CLAUDE.md
+PLAN.md
 *.pyc
 __pycache__
 win32/*.nupkg
