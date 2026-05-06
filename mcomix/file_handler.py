@@ -63,6 +63,13 @@ class FileHandler(object):
         self._condition = None
         #: Provides a list of available files/archives in the open directory.
         self._file_provider = None
+        #: Temp dir for files downloaded from non-local URIs.
+        self._net_tmp_dir = None
+        #: Original URI of the currently open file when it came from a non-local
+        #: location; None for ordinary local files.  Needed so next/prev archive
+        #: navigation can enumerate the remote parent directory instead of the
+        #: local temp dir (which only ever contains the one downloaded file).
+        self._source_uri = None
         #: Keeps track of the last read page in archives
         self.last_read_page = last_read_page.LastReadPage(backend.LibraryBackend())
         #: Regexp used for determining which archive files are comment files.
@@ -70,6 +77,40 @@ class FileHandler(object):
         self.update_comment_extensions()
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
+
+    def _resolve_uri(self, path):
+        """Resolve a path or list of paths that may be URIs to local paths.
+
+        For GIO locations that have a local POSIX mount (e.g. GVFS smb
+        mounts under /run/user/*/gvfs/…) the local path is returned directly.
+        For truly non-local URIs the file is copied to a per-open temp dir
+        so the rest of the pipeline can work on a normal local path.
+
+        Returns the same structure (string or list) as was passed in.
+        """
+        if isinstance(path, list):
+            return [self._resolve_uri(p) for p in path]
+        if '://' not in path:
+            return path
+        from gi.repository import Gio
+        gfile = Gio.File.new_for_uri(path)
+        local = gfile.get_path()
+        if local:
+            return local
+        # No POSIX path — download to a managed temp directory.
+        if self._net_tmp_dir is None:
+            self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
+        basename = gfile.get_basename() or 'mcomix_net_file'
+        tmp_path = os.path.join(self._net_tmp_dir, basename)
+        dest = Gio.File.new_for_path(tmp_path)
+        try:
+            gfile.copy(dest, Gio.FileCopyFlags.OVERWRITE, None, None, None)
+        except Exception as ex:
+            raise IOError(_('Could not copy remote file "%s": %s') % (path, str(ex)))
+        # Remember the original URI so next/prev archive can enumerate the
+        # remote parent directory rather than the single-file temp dir.
+        self._source_uri = path
+        return tmp_path
 
     def refresh_file(self, *args, **kwargs):
         """ Closes the current file(s)/archive and reloads them. """
@@ -93,6 +134,15 @@ class FileHandler(object):
         """
 
         self._close()
+
+        # Convert any URI strings (e.g. smb://) to local POSIX paths before the
+        # rest of the pipeline, which assumes os.path-compatible strings throughout.
+        try:
+            path = self._resolve_uri(path)
+        except IOError as ex:
+            self._window.statusbar.set_message(str(ex))
+            self._window.osd.show(str(ex))
+            return False
 
         try:
             path = self._initialize_fileprovider(path, keep_fileprovider)
@@ -214,6 +264,7 @@ class FileHandler(object):
             self._stop_waiting = True
             self._comment_files = []
             self._name_table.clear()
+            self._source_uri = None
             self.file_closed()
         # Catch up on UI events, so we don't leave idle callbacks.
         while Gtk.events_pending():
@@ -222,6 +273,10 @@ class FileHandler(object):
         if self._tmp_dir is not None:
             self.thread_delete(self._tmp_dir)
             self._tmp_dir = None
+        # Clean up any file copied from a non-local URI (see _resolve_uri).
+        if self._net_tmp_dir is not None:
+            self.thread_delete(self._net_tmp_dir)
+            self._net_tmp_dir = None
 
     def _initialize_fileprovider(self, path, keep_fileprovider):
         """ Creates the L{file_provider.FileProvider} for C{path}.
@@ -453,12 +508,66 @@ class FileHandler(object):
 
         return self._window.imagehandler.get_pretty_current_filename()
 
+    def _network_archive_siblings(self):
+        """Return a sorted list of archive URIs in the same remote directory as
+        the currently open file, using GIO to enumerate the parent.
+
+        Only called when self._source_uri is set (i.e. the current file was
+        downloaded from a non-local URI).  Returns an empty list on any error.
+        """
+        from gi.repository import Gio
+
+        # Build the set of known archive extensions for filename-based filtering
+        # (we can't read file content remotely just to detect the type).
+        archive_exts = set()
+        for mime_types, extensions in archive_tools.get_supported_formats().values():
+            archive_exts.update(ext.lower() for ext in extensions)
+
+        gfile = Gio.File.new_for_uri(self._source_uri)
+        parent = gfile.get_parent()
+        if parent is None:
+            return []
+        try:
+            enumerator = parent.enumerate_children(
+                'standard::name', Gio.FileQueryInfoFlags.NONE, None)
+        except Exception as ex:
+            log.error('Could not list remote directory for archive navigation: %s', ex)
+            return []
+
+        names = []
+        while True:
+            info = enumerator.next_file(None)
+            if info is None:
+                break
+            name = info.get_name()
+            if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
+                names.append(name)
+        enumerator.close(None)
+
+        tools.alphanumeric_sort(names)
+        return [parent.get_child(name).get_uri() for name in names]
+
     def _open_next_archive(self, *args):
         """Open the archive that comes directly after the currently loaded
         archive in that archive's directory listing, sorted alphabetically.
         Returns True if a new archive was opened, False otherwise.
         """
         if self.archive_type is not None:
+
+            # For network files the file provider only knows about the single
+            # downloaded temp file; use GIO enumeration instead.
+            if self._source_uri:
+                siblings = self._network_archive_siblings()
+                current_uri = self._source_uri
+                try:
+                    idx = siblings.index(current_uri)
+                except ValueError:
+                    return False
+                for uri in siblings[idx + 1:]:
+                    self._close()
+                    self.open_file(uri)
+                    return True
+                return False
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
@@ -479,6 +588,21 @@ class FileHandler(object):
         Returns True if a new archive was opened, False otherwise.
         """
         if self.archive_type is not None:
+
+            # For network files the file provider only knows about the single
+            # downloaded temp file; use GIO enumeration instead.
+            if self._source_uri:
+                siblings = self._network_archive_siblings()
+                current_uri = self._source_uri
+                try:
+                    idx = siblings.index(current_uri)
+                except ValueError:
+                    return False
+                for uri in reversed(siblings[:idx]):
+                    self._close()
+                    self.open_file(uri, prefs['open first file in prev archive'] - 1)
+                    return True
+                return False
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)

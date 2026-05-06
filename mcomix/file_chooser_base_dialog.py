@@ -3,7 +3,7 @@
 import os
 import mimetypes
 import fnmatch
-from gi.repository import Gtk, Pango
+from gi.repository import Gtk, Gio, Pango  # Gio added for URI-aware file queries (network support)
 
 from mcomix.preferences import prefs
 from mcomix import image_tools
@@ -92,17 +92,27 @@ class _BaseFileChooserDialog(Gtk.Dialog):
             # If a file is currently open, use its path
             if current_file and os.path.exists(current_file):
                 self.filechooser.set_current_folder(os.path.dirname(current_file))
-            # If no file is open, use the last stored file
-            elif (last_file and os.path.exists(last_file)):
-                self.filechooser.set_filename(last_file)
-            # If no file was stored yet, fall back to preferences
-            elif os.path.isdir(prefs['path of last browsed in filechooser']):
-                if prefs['store recent file info']:
-                    self.filechooser.set_current_folder(
-                        prefs['path of last browsed in filechooser'])
-                else:
-                    self.filechooser.set_current_folder(
-                        constants.HOME_DIR)
+            # last_file may be a non-local URI (e.g. smb://) if the user previously
+            # opened a file over the network; set_current_folder() only accepts POSIX paths.
+            elif last_file:
+                if '://' in last_file:
+                    gfile = Gio.File.new_for_uri(last_file)
+                    parent = gfile.get_parent()
+                    if parent:
+                        self.filechooser.set_current_folder_uri(parent.get_uri())
+                elif os.path.exists(last_file):
+                    self.filechooser.set_filename(last_file)
+            # The pref may also hold a non-local URI if the user last browsed a
+            # network location; route through set_current_folder_uri() in that case.
+            else:
+                last_browsed = prefs['path of last browsed in filechooser']
+                if '://' in last_browsed:
+                    self.filechooser.set_current_folder_uri(last_browsed)
+                elif os.path.isdir(last_browsed):
+                    if prefs['store recent file info']:
+                        self.filechooser.set_current_folder(last_browsed)
+                    else:
+                        self.filechooser.set_current_folder(constants.HOME_DIR)
 
         except Exception as ex: # E.g. broken prefs values.
             log.debug(ex)
@@ -200,33 +210,53 @@ class _BaseFileChooserDialog(Gtk.Dialog):
         event only changed the current directory.
         """
         if response == Gtk.ResponseType.OK:
-            if not self.filechooser.get_filenames():
+            # get_filenames() returns nothing for GIO-only locations (e.g. smb://);
+            # get_uris() works for both local and network paths.
+            uris = self.filechooser.get_uris()
+            if not uris:
                 return
 
-            # Collect files, if necessary also from subdirectories
-            filter = self.filechooser.get_filter()
-            paths = [ ]
-            for path in self.filechooser.get_filenames():
-                if os.path.isdir(path):
-                    subdir_files = list(self.collect_files_from_subdir(path, filter,
-                        self.should_open_recursive()))
-                    file_provider.FileProvider.sort_files(subdir_files)
-                    paths.extend(subdir_files)
+            # Use query_file_type() instead of os.path.isdir() because the latter
+            # only works on POSIX paths; GIO handles both local and network locations.
+            ffilter = self.filechooser.get_filter()
+            paths = []
+            for uri in uris:
+                gfile = Gio.File.new_for_uri(uri)
+                file_type = gfile.query_file_type(Gio.FileQueryInfoFlags.NONE, None)
+                if file_type == Gio.FileType.DIRECTORY:
+                    local_path = gfile.get_path()
+                    if local_path:
+                        subdir_files = list(self.collect_files_from_subdir(
+                            local_path, ffilter, self.should_open_recursive()))
+                        file_provider.FileProvider.sort_files(subdir_files)
+                        paths.extend(subdir_files)
+                    else:
+                        # os.walk() can't traverse non-POSIX locations; skip for now.
+                        log.warning('Cannot expand non-local directory: %s', uri)
                 else:
-                    paths.append(path)
+                    local_path = gfile.get_path()
+                    # Pass the raw URI when there is no POSIX path so that
+                    # file_handler._resolve_uri() can copy it to a temp location.
+                    paths.append(local_path if local_path else uri)
+
+            if not paths:
+                return
 
             # FileChooser.set_do_overwrite_confirmation() doesn't seem to
             # work on our custom dialog, so we use a simple alternative.
-            first_path = self.filechooser.get_filenames()[0]
+            first_gfile = Gio.File.new_for_uri(uris[0])
+            first_path = first_gfile.get_path() or uris[0]
+            # query_exists() works for both local and remote Gio.File objects.
+            first_type = first_gfile.query_file_type(Gio.FileQueryInfoFlags.NONE, None)
             if (self._action == Gtk.FileChooserAction.SAVE and
-                not os.path.isdir(first_path) and
-                os.path.exists(first_path)):
+                first_type != Gio.FileType.DIRECTORY and
+                first_gfile.query_exists(None)):
 
                 overwrite_dialog = message_dialog.MessageDialog(None, 0,
                     Gtk.MessageType.QUESTION, Gtk.ButtonsType.OK_CANCEL)
                 overwrite_dialog.set_text(
                     _("A file named '%s' already exists. Do you want to replace it?") %
-                        os.path.basename(first_path),
+                        first_gfile.get_basename(),
                     _('Replacing it will overwrite its contents.'))
                 response = overwrite_dialog.run()
 
@@ -234,13 +264,17 @@ class _BaseFileChooserDialog(Gtk.Dialog):
                     self.emit_stop_by_name('response')
                     return
 
-            # Do not store path if the user chose not to keep a file history
+            # Do not store path if the user chose not to keep a file history.
+            # Store the URI string when there is no local path so the next open
+            # can restore to a network location via set_current_folder_uri().
             if prefs['store recent file info']:
+                folder_uri = self.filechooser.get_current_folder_uri() or ''
+                folder_gfile = Gio.File.new_for_uri(folder_uri)
+                local_folder = folder_gfile.get_path()
                 prefs['path of last browsed in filechooser'] = \
-                    self.filechooser.get_current_folder()
+                    local_folder if local_folder else folder_uri
             else:
-                prefs['path of last browsed in filechooser'] = \
-                    constants.HOME_DIR
+                prefs['path of last browsed in filechooser'] = constants.HOME_DIR
 
             self.__class__._last_activated_file = first_path
             self.files_chosen(paths)
@@ -251,16 +285,20 @@ class _BaseFileChooserDialog(Gtk.Dialog):
         self._destroyed = True
 
     def _update_preview(self, *args):
-        if self.filechooser.get_preview_filename():
-            path = self.filechooser.get_preview_filename()
-        else:
-            path = None
+        # get_preview_filename() returns None for non-local GIO locations;
+        # get_preview_uri() + get_path() degrades gracefully (local_path is None)
+        # so we silently skip thumbnailing for network files rather than crashing.
+        uri = self.filechooser.get_preview_uri()
+        local_path = None
+        if uri:
+            gfile = Gio.File.new_for_uri(uri)
+            local_path = gfile.get_path()
 
-        if path and os.path.isfile(path):
+        if local_path and os.path.isfile(local_path):
             thumbnailer = thumbnail_tools.Thumbnailer(size=(128, 128),
                                                       archive_support=True)
             thumbnailer.thumbnail_finished += self._preview_thumbnail_finished
-            thumbnailer.thumbnail(path, threaded=True)
+            thumbnailer.thumbnail(local_path, threaded=True)
         else:
             self._preview_image.clear()
             self._namelabel.set_text('')
