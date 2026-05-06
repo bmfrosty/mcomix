@@ -65,6 +65,11 @@ class FileHandler(object):
         self._file_provider = None
         #: Temp dir for files downloaded from non-local URIs.
         self._net_tmp_dir = None
+        #: Original URI of the currently open file when it came from a non-local
+        #: location; None for ordinary local files.  Needed so next/prev archive
+        #: navigation can enumerate the remote parent directory instead of the
+        #: local temp dir (which only ever contains the one downloaded file).
+        self._source_uri = None
         #: Keeps track of the last read page in archives
         self.last_read_page = last_read_page.LastReadPage(backend.LibraryBackend())
         #: Regexp used for determining which archive files are comment files.
@@ -102,6 +107,9 @@ class FileHandler(object):
             gfile.copy(dest, Gio.FileCopyFlags.OVERWRITE, None, None, None)
         except Exception as ex:
             raise IOError(_('Could not copy remote file "%s": %s') % (path, str(ex)))
+        # Remember the original URI so next/prev archive can enumerate the
+        # remote parent directory rather than the single-file temp dir.
+        self._source_uri = path
         return tmp_path
 
     def refresh_file(self, *args, **kwargs):
@@ -256,6 +264,7 @@ class FileHandler(object):
             self._stop_waiting = True
             self._comment_files = []
             self._name_table.clear()
+            self._source_uri = None
             self.file_closed()
         # Catch up on UI events, so we don't leave idle callbacks.
         while Gtk.events_pending():
@@ -499,12 +508,66 @@ class FileHandler(object):
 
         return self._window.imagehandler.get_pretty_current_filename()
 
+    def _network_archive_siblings(self):
+        """Return a sorted list of archive URIs in the same remote directory as
+        the currently open file, using GIO to enumerate the parent.
+
+        Only called when self._source_uri is set (i.e. the current file was
+        downloaded from a non-local URI).  Returns an empty list on any error.
+        """
+        from gi.repository import Gio
+
+        # Build the set of known archive extensions for filename-based filtering
+        # (we can't read file content remotely just to detect the type).
+        archive_exts = set()
+        for mime_types, extensions in archive_tools.get_supported_formats().values():
+            archive_exts.update(ext.lower() for ext in extensions)
+
+        gfile = Gio.File.new_for_uri(self._source_uri)
+        parent = gfile.get_parent()
+        if parent is None:
+            return []
+        try:
+            enumerator = parent.enumerate_children(
+                'standard::name', Gio.FileQueryInfoFlags.NONE, None)
+        except Exception as ex:
+            log.error('Could not list remote directory for archive navigation: %s', ex)
+            return []
+
+        names = []
+        while True:
+            info = enumerator.next_file(None)
+            if info is None:
+                break
+            name = info.get_name()
+            if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
+                names.append(name)
+        enumerator.close(None)
+
+        tools.alphanumeric_sort(names)
+        return [parent.get_child(name).get_uri() for name in names]
+
     def _open_next_archive(self, *args):
         """Open the archive that comes directly after the currently loaded
         archive in that archive's directory listing, sorted alphabetically.
         Returns True if a new archive was opened, False otherwise.
         """
         if self.archive_type is not None:
+
+            # For network files the file provider only knows about the single
+            # downloaded temp file; use GIO enumeration instead.
+            if self._source_uri:
+                siblings = self._network_archive_siblings()
+                current_uri = self._source_uri
+                try:
+                    idx = siblings.index(current_uri)
+                except ValueError:
+                    return False
+                for uri in siblings[idx + 1:]:
+                    self._close()
+                    self.open_file(uri)
+                    return True
+                return False
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
@@ -525,6 +588,21 @@ class FileHandler(object):
         Returns True if a new archive was opened, False otherwise.
         """
         if self.archive_type is not None:
+
+            # For network files the file provider only knows about the single
+            # downloaded temp file; use GIO enumeration instead.
+            if self._source_uri:
+                siblings = self._network_archive_siblings()
+                current_uri = self._source_uri
+                try:
+                    idx = siblings.index(current_uri)
+                except ValueError:
+                    return False
+                for uri in reversed(siblings[:idx]):
+                    self._close()
+                    self.open_file(uri, prefs['open first file in prev archive'] - 1)
+                    return True
+                return False
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
