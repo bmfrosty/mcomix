@@ -18,9 +18,7 @@ jobs:
             io.github.bmfrosty.mcomix.yml | grep 'commit:' | awk '{print $2}')
           base_head=$(git rev-parse origin/${{ github.base_ref }})
           if [ "$pinned" != "$base_head" ]; then
-            echo "::error::Manifest pins mcomix at ${pinned:0:8} but \
-${{ github.base_ref }} HEAD is ${base_head:0:8}. \
-Update the commit in io.github.bmfrosty.mcomix.yml to: $base_head"
+            echo "::error::Manifest pins mcomix at ${pinned:0:8} but ${{ github.base_ref }} HEAD is ${base_head:0:8}. Update the commit in io.github.bmfrosty.mcomix.yml to: $base_head"
             exit 1
           fi
 
