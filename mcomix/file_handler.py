@@ -185,6 +185,15 @@ class FileHandler(object):
         if isinstance(path, list):
             return [self._resolve_uri(p) for p in path]
         if '://' not in path:
+            # Plain POSIX path — but if it's a document-portal path
+            # (/run/user/*/doc/<id>/…) we can recover the real network URI
+            # via DBus so next/prev archive navigation works.
+            if '/run/user/' in path and '/doc/' in path:
+                log.debug('_resolve_uri: local doc-portal path=%s', path)
+                net_uri = self._doc_portal_real_uri(path)
+                if net_uri and not net_uri.startswith('file://'):
+                    self._source_uri = net_uri
+                    log.debug('_resolve_uri: doc portal -> _source_uri=%s', net_uri)
             return path
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
