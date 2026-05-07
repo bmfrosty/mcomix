@@ -98,9 +98,11 @@ class FileHandler(object):
         if '://' not in path:
             return path
         from gi.repository import Gio
+        log.debug('_resolve_uri: input URI=%s', path)
         gfile = Gio.File.new_for_uri(path)
         local = gfile.get_path()
         if local:
+            log.debug('_resolve_uri: GVFS local path=%s  (_source_uri stays None)', local)
             return local
         # No POSIX path — download to a managed temp directory.
         if self._net_tmp_dir is None:
@@ -115,6 +117,7 @@ class FileHandler(object):
         # Remember the original URI so next/prev archive can enumerate the
         # remote parent directory rather than the single-file temp dir.
         self._source_uri = path
+        log.debug('_resolve_uri: no local path, copied to tmp=%s, _source_uri=%s', tmp_path, path)
         return tmp_path
 
     def refresh_file(self, *args, **kwargs):
@@ -524,6 +527,8 @@ class FileHandler(object):
         """
         from gi.repository import Gio
 
+        log.debug('_build_net_sibling_cache: _source_uri=%s', self._source_uri)
+
         archive_exts = set()
         for mime_types, extensions in archive_tools.get_supported_formats().values():
             archive_exts.update(ext.lower() for ext in extensions)
@@ -531,8 +536,10 @@ class FileHandler(object):
         gfile = Gio.File.new_for_uri(self._source_uri)
         parent = gfile.get_parent()
         if parent is None:
+            log.debug('_build_net_sibling_cache: no parent, cannot enumerate')
             self._net_sibling_cache = None
             return
+        log.debug('_build_net_sibling_cache: enumerating parent=%s', parent.get_uri())
         try:
             enumerator = parent.enumerate_children(
                 'standard::name', Gio.FileQueryInfoFlags.NONE, None)
@@ -552,17 +559,22 @@ class FileHandler(object):
         enumerator.close(None)
 
         tools.alphanumeric_sort(names)
+        log.debug('_build_net_sibling_cache: found %d archive siblings', len(names))
 
         current_name = gfile.get_basename()
+        log.debug('_build_net_sibling_cache: current_name=%s', current_name)
         try:
             idx = names.index(current_name)
         except ValueError:
+            log.debug('_build_net_sibling_cache: current_name not found in sibling list (first 5: %s)',
+                      names[:5])
             self._net_sibling_cache = None
             return
 
         parent_uri = parent.get_uri()
         prev_names = list(reversed(names[max(0, idx - 10):idx]))
         next_names = names[idx + 1:idx + 11]
+        log.debug('_build_net_sibling_cache: idx=%d, prev=%s, next=%s', idx, prev_names, next_names)
         self._net_sibling_cache = {
             'parent_uri': parent_uri,
             'current_uri': self._source_uri,
@@ -579,6 +591,7 @@ class FileHandler(object):
 
             # For network files the file provider only knows about the single
             # downloaded temp file; use GIO enumeration instead.
+            log.debug('_open_next_archive: _source_uri=%s', self._source_uri)
             if self._source_uri:
                 cache = self._net_sibling_cache
                 if (cache is None or
@@ -587,6 +600,7 @@ class FileHandler(object):
                     self._build_net_sibling_cache()
                     cache = self._net_sibling_cache
                 if not cache or not cache['next']:
+                    log.debug('_open_next_archive: no next archive available')
                     return False
                 next_uri = cache['next'][0]
                 self._net_sibling_cache = {
@@ -621,6 +635,7 @@ class FileHandler(object):
 
             # For network files the file provider only knows about the single
             # downloaded temp file; use GIO enumeration instead.
+            log.debug('_open_previous_archive: _source_uri=%s', self._source_uri)
             if self._source_uri:
                 cache = self._net_sibling_cache
                 if (cache is None or
@@ -629,6 +644,7 @@ class FileHandler(object):
                     self._build_net_sibling_cache()
                     cache = self._net_sibling_cache
                 if not cache or not cache['prev']:
+                    log.debug('_open_previous_archive: no prev archive available')
                     return False
                 prev_uri = cache['prev'][0]
                 self._net_sibling_cache = {
