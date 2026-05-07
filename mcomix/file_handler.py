@@ -83,6 +83,78 @@ class FileHandler(object):
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
 
+    def _diagnose_doc_portal(self, path):
+        """Log everything we can find about a document-portal path to determine
+        the best way to recover the real GVFS/network path for sibling nav."""
+        import glob, stat as stat_mod
+
+        log.debug('=== doc-portal diagnostic for %s ===', path)
+
+        # 1. stat
+        try:
+            st = os.stat(path)
+            log.debug('stat: ino=%d dev=%d size=%d', st.st_ino, st.st_dev, st.st_size)
+        except Exception as e:
+            log.debug('stat failed: %s', e)
+
+        # 2. xattrs
+        try:
+            attrs = os.listxattr(path)
+            log.debug('xattrs: %s', attrs)
+            for attr in attrs:
+                try:
+                    log.debug('  xattr %s = %r', attr, os.getxattr(path, attr))
+                except Exception as e:
+                    log.debug('  xattr %s error: %s', attr, e)
+        except Exception as e:
+            log.debug('listxattr failed: %s', e)
+
+        # 3. GIO query_info — all attributes
+        try:
+            from gi.repository import Gio
+            gfile = Gio.File.new_for_path(path)
+            info = gfile.query_info('*', Gio.FileQueryInfoFlags.NONE, None)
+            for attr in (info.list_attributes(None) or []):
+                log.debug('  gio attr %s = %s', attr, info.get_attribute_as_string(attr))
+        except Exception as e:
+            log.debug('query_info failed: %s', e)
+
+        # 4. /proc/self/fd — look for any open fd that resolves to a GVFS path
+        #    with the same basename (FUSE passthrough exposes the real backing path)
+        basename = os.path.basename(path)
+        for fd_link in glob.glob('/proc/self/fd/*'):
+            try:
+                target = os.readlink(fd_link)
+                if os.path.basename(target) == basename:
+                    log.debug('proc/fd match: %s -> %s', fd_link, target)
+            except OSError:
+                pass
+
+        # 5. GVFS directory listing — find mounts that contain our filename
+        gvfs_root = '/run/user/%d/gvfs' % os.getuid()
+        if os.path.isdir(gvfs_root):
+            log.debug('GVFS mounts: %s', os.listdir(gvfs_root))
+            for mount in os.listdir(gvfs_root):
+                mount_path = os.path.join(gvfs_root, mount)
+                try:
+                    # Walk top two levels looking for basename match
+                    for entry in os.listdir(mount_path):
+                        if entry == basename:
+                            log.debug('GVFS match (top): %s/%s', mount_path, entry)
+                        sub = os.path.join(mount_path, entry)
+                        if os.path.isdir(sub):
+                            try:
+                                if basename in os.listdir(sub):
+                                    log.debug('GVFS match (sub): %s/%s', sub, basename)
+                            except OSError:
+                                pass
+                except OSError:
+                    pass
+        else:
+            log.debug('GVFS root %s not accessible', gvfs_root)
+
+        log.debug('=== end doc-portal diagnostic ===')
+
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
 
@@ -97,22 +169,9 @@ class FileHandler(object):
             return [self._resolve_uri(p) for p in path]
         if '://' not in path:
             # Plain POSIX path.  If it's a document-portal path
-            # (/run/user/*/doc/<id>/…) try to recover the real GVFS path via
-            # readlink so we can enumerate the parent directory for sibling nav.
+            # (/run/user/*/doc/<id>/…) try to recover the real GVFS path.
             if '/run/user/' in path and '/doc/' in path:
-                log.debug('_resolve_uri: doc-portal path=%s', path)
-                try:
-                    link_target = os.readlink(path)
-                    log.debug('_resolve_uri: doc-portal readlink=%s', link_target)
-                    # link_target is typically /run/user/*/gvfs/<backend>/<rel>
-                    # Set _source_uri to its file:// URI so _build_net_sibling_cache
-                    # can enumerate the parent (requires --filesystem=xdg-run/gvfs).
-                    if link_target:
-                        from gi.repository import Gio
-                        self._source_uri = Gio.File.new_for_path(link_target).get_uri()
-                        log.debug('_resolve_uri: doc-portal -> _source_uri=%s', self._source_uri)
-                except OSError as e:
-                    log.debug('_resolve_uri: doc-portal readlink failed: %s', e)
+                self._diagnose_doc_portal(path)
             return path
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
