@@ -18,9 +18,14 @@ jobs:
             io.github.bmfrosty.mcomix.yml | grep 'commit:' | awk '{print $2}')
           base_head=$(git rev-parse origin/${{ github.base_ref }})
           if [ "$pinned" != "$base_head" ]; then
-            echo "::error::Manifest pins mcomix at ${pinned:0:8} but \
-${{ github.base_ref }} HEAD is ${base_head:0:8}. \
-Update the commit in io.github.bmfrosty.mcomix.yml to: $base_head"
+            echo "::error::Manifest pins mcomix at ${pinned:0:8} but ${{ github.base_ref }} HEAD is ${base_head:0:8}. Update the commit in io.github.bmfrosty.mcomix.yml to: $base_head"
+            exit 1
+          fi
+      - name: Verify FORK_PR matches this PR number
+        run: |
+          fork_pr=$(grep -oP 'FORK_PR\s*=\s*\K[0-9]+' mcomix/constants.py)
+          if [ "$fork_pr" != "${{ github.event.pull_request.number }}" ]; then
+            echo "::error::FORK_PR in mcomix/constants.py is $fork_pr but this PR is #${{ github.event.pull_request.number }}. Set FORK_PR = ${{ github.event.pull_request.number }} in mcomix/constants.py."
             exit 1
           fi
 
