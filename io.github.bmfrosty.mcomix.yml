@@ -74,7 +74,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: 822eef5453fa0293e3c4005e1eeb241ddacfeec3
+        commit: cfff51d48e08f853f04ad6568ce09db6f7b855b6
 
       - type: shell
         commands:
@@ -83,7 +83,7 @@ modules:
           - sed -i "s:constants.APPNAME:'${FLATPAK_ID}':g" ./mcomix/run.py
           # Append pr<N>.<sha> to VERSION so the About dialog shows e.g.
           # "3.2.0-dev0+pr10.822eef5", making the installed build unambiguous.
-          - pr=$(grep -oP 'FORK_PR\s*=\s*\K[0-9]+' mcomix/constants.py || echo 0);
+          - pr=$(sed -n 's/^FORK_PR = \([0-9]*\).*/\1/p' mcomix/constants.py || echo 0);
             commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown);
             sed -i "s/VERSION = '\([^']*\)'/VERSION = '\1+pr${pr}.${commit}'/" mcomix/constants.py
 
