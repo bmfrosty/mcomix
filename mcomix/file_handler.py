@@ -117,6 +117,85 @@ class FileHandler(object):
         log.debug('_scan_fds: no backing path found')
         return None
 
+    def _diag_sandbox_doc_path(self):
+        """Diagnostic: query GIO attributes and enumerate /run/flatpak/doc/.
+
+        Runs once after a doc-portal file opens to probe whether:
+        - The sandbox-internal /run/flatpak/doc/<id>/file path exposes a
+          standard::target-uri pointing back to the smb:// source.
+        - /run/flatpak/doc/ (the full doc directory) can be enumerated,
+          and what documents (and archive files) are listed there.
+        """
+        from gi.repository import Gio
+
+        # 1. Probe the sandbox-internal path of the current file.
+        sandbox_path = re.sub(r'^/run/user/\d+/doc/', '/run/flatpak/doc/', self._current_file)
+        log.debug('_diag: sandbox_path=%s', sandbox_path)
+        gf = Gio.File.new_for_path(sandbox_path)
+        try:
+            info = gf.query_info('standard::*,xattr::*', Gio.FileQueryInfoFlags.NONE, None)
+            attrs = {}
+            for attr in info.list_attributes(None):
+                try:
+                    attrs[attr] = info.get_attribute_as_string(attr)
+                except Exception:
+                    pass
+            log.debug('_diag: sandbox file GIO attrs: %s', attrs)
+        except Exception as ex:
+            log.debug('_diag: sandbox file query_info failed: %s', ex)
+
+        # 2. Probe the parent directory inside /run/flatpak/doc/<id>/.
+        sandbox_dir = os.path.dirname(sandbox_path)
+        gd = Gio.File.new_for_path(sandbox_dir)
+        try:
+            info = gd.query_info('standard::*', Gio.FileQueryInfoFlags.NONE, None)
+            attrs = {}
+            for attr in info.list_attributes(None):
+                try:
+                    attrs[attr] = info.get_attribute_as_string(attr)
+                except Exception:
+                    pass
+            log.debug('_diag: sandbox dir GIO attrs: %s', attrs)
+        except Exception as ex:
+            log.debug('_diag: sandbox dir query_info failed: %s', ex)
+
+        # 3. Enumerate /run/flatpak/doc/ — lists all granted doc IDs.
+        flatpak_doc_root = '/run/flatpak/doc'
+        gr = Gio.File.new_for_path(flatpak_doc_root)
+        try:
+            enumerator = gr.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, None)
+            doc_ids = []
+            while True:
+                info = enumerator.next_file(None)
+                if info is None:
+                    break
+                doc_ids.append(info.get_name())
+            enumerator.close(None)
+            log.debug('_diag: /run/flatpak/doc has %d doc entries: %s', len(doc_ids), doc_ids)
+
+            # For each doc, list archive files and try to get their target-uri.
+            archive_exts = set()
+            for _, exts in archive_tools.get_supported_formats().values():
+                archive_exts.update(e.lower() for e in exts)
+            for doc_id in doc_ids:
+                doc_gf = gr.get_child(doc_id)
+                try:
+                    de = doc_gf.enumerate_children(
+                        'standard::name,standard::target-uri', Gio.FileQueryInfoFlags.NONE, None)
+                    while True:
+                        fi = de.next_file(None)
+                        if fi is None:
+                            break
+                        name = fi.get_name()
+                        target = fi.get_attribute_as_string('standard::target-uri') or ''
+                        if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
+                            log.debug('_diag: doc/%s/%s target-uri=%s', doc_id, name, target)
+                    de.close(None)
+                except Exception as ex:
+                    log.debug('_diag: enumerate doc/%s failed: %s', doc_id, ex)
+        except Exception as ex:
+            log.debug('_diag: enumerate /run/flatpak/doc failed: %s', ex)
+
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
 
@@ -249,6 +328,8 @@ class FileHandler(object):
                     from gi.repository import Gio
                     self._source_uri = Gio.File.new_for_path(backing).get_uri()
                     log.debug('open_file: fd-scan backing path -> _source_uri=%s', self._source_uri)
+                # Diagnostic: query GIO attributes on the sandbox-internal doc path.
+                self._diag_sandbox_doc_path()
             self.file_loading = True
         else:
             image_files, current_image_index = \
@@ -700,9 +781,20 @@ class FileHandler(object):
             except Exception as ex:
                 log.debug('_build_folder_doc_sibling_cache: enumerate %s failed: %s', try_uri, ex)
 
+        # Store a valid-but-empty cache even on failure so callers don't
+        # re-enumerate the remote folder on every keypress.
+        _empty = {
+            '_type': 'folder_doc',
+            'folder_hint_uri': self._folder_hint_uri,
+            'current_basename': current_basename,
+            'parent_uri': None,
+            'prev': [],
+            'next': [],
+        }
+
         if not names or enum_gfile is None:
             log.debug('_build_folder_doc_sibling_cache: no siblings found')
-            self._net_sibling_cache = None
+            self._net_sibling_cache = _empty
             return
 
         tools.alphanumeric_sort(names)
@@ -712,7 +804,7 @@ class FileHandler(object):
             idx = names.index(current_basename)
         except ValueError:
             log.debug('_build_folder_doc_sibling_cache: current not in list (first 5: %s)', names[:5])
-            self._net_sibling_cache = None
+            self._net_sibling_cache = _empty
             return
 
         prev_names = list(reversed(names[max(0, idx - 10):idx]))
