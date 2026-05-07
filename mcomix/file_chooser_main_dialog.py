@@ -200,12 +200,7 @@ class _MainFileChooserDialog:
                 gfile = Gio.File.new_for_uri(uri)
                 local = gfile.get_path()
                 log.debug('file chooser response: uri=%s local=%s', uri, local)
-                if local and is_folder_doc_portal:
-                    # Use the folder document so the parent dir is enumerable.
-                    folder_file_path = os.path.join(folder_local, gfile.get_basename())
-                    log.debug('file chooser response: folder-doc path=%s', folder_file_path)
-                    paths.append(folder_file_path)
-                elif local and is_network_folder:
+                if local and is_network_folder:
                     # Direct network URI (non-portal case).
                     net_uri = folder_gfile.get_child(gfile.get_basename()).get_uri()
                     log.debug('file chooser response: network URI=%s', net_uri)

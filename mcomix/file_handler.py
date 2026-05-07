@@ -97,14 +97,22 @@ class FileHandler(object):
             return [self._resolve_uri(p) for p in path]
         if '://' not in path:
             # Plain POSIX path.  If it's a document-portal path
-            # (/run/user/*/doc/<id>/…) the file chooser has already mapped the
-            # folder to a folder-document, so the parent directory is enumerable
-            # and all siblings are accessible.  Store a file:// URI as
-            # _source_uri so _build_net_sibling_cache can enumerate siblings.
+            # (/run/user/*/doc/<id>/…) try to recover the real GVFS path via
+            # readlink so we can enumerate the parent directory for sibling nav.
             if '/run/user/' in path and '/doc/' in path:
-                from gi.repository import Gio
-                self._source_uri = Gio.File.new_for_path(path).get_uri()
-                log.debug('_resolve_uri: doc-portal path -> _source_uri=%s', self._source_uri)
+                log.debug('_resolve_uri: doc-portal path=%s', path)
+                try:
+                    link_target = os.readlink(path)
+                    log.debug('_resolve_uri: doc-portal readlink=%s', link_target)
+                    # link_target is typically /run/user/*/gvfs/<backend>/<rel>
+                    # Set _source_uri to its file:// URI so _build_net_sibling_cache
+                    # can enumerate the parent (requires --filesystem=xdg-run/gvfs).
+                    if link_target:
+                        from gi.repository import Gio
+                        self._source_uri = Gio.File.new_for_path(link_target).get_uri()
+                        log.debug('_resolve_uri: doc-portal -> _source_uri=%s', self._source_uri)
+                except OSError as e:
+                    log.debug('_resolve_uri: doc-portal readlink failed: %s', e)
             return path
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
@@ -117,11 +125,12 @@ class FileHandler(object):
                 # store the original URI so GIO can enumerate the remote dir.
                 self._source_uri = path
                 log.debug('_resolve_uri: set _source_uri=%s', path)
-            elif '/run/user/' in local and '/doc/' in local:
-                # file:// URI that resolves to a doc-portal path (navigation
-                # step opening a sibling via the folder document) — keep it.
+            elif '/run/user/' in local and '/gvfs/' in local:
+                # file:// URI resolving to a GVFS path (navigation step after
+                # readlink recovered the real path).  Keep it as _source_uri so
+                # subsequent prev/next presses continue to enumerate the same dir.
                 self._source_uri = path
-                log.debug('_resolve_uri: doc-portal file:// URI -> _source_uri=%s', path)
+                log.debug('_resolve_uri: GVFS file:// URI -> _source_uri=%s', path)
             return local
         # No POSIX path — download to a managed temp directory.
         if self._net_tmp_dir is None:
