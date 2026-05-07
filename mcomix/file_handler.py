@@ -23,6 +23,10 @@ from mcomix import message_dialog
 from mcomix.library import backend
 from mcomix.i18n import _
 
+# Sentinel for open_file's folder_hint parameter — distinguishes "caller didn't
+# pass a hint" (preserve existing) from "caller explicitly passed None" (clear it).
+_MISSING = object()
+
 
 class FileHandler(object):
 
@@ -75,6 +79,10 @@ class FileHandler(object):
         #: up to 10), next (list, closest-first, up to 10).  Avoids re-enumerating
         #: a large remote directory on every prev/next keypress.
         self._net_sibling_cache = None
+        #: Folder document URI passed by the file chooser when a portal folder
+        #: document is the current folder.  Enables sibling-archive navigation by
+        #: enumerating the sandbox-internal /run/flatpak/doc/<id>/ path.
+        self._folder_hint_uri = None
         #: Keeps track of the last read page in archives
         self.last_read_page = last_read_page.LastReadPage(backend.LibraryBackend())
         #: Regexp used for determining which archive files are comment files.
@@ -171,7 +179,7 @@ class FileHandler(object):
                 start_page = 0
             self.open_file(current_file, start_page, keep_fileprovider=True)
 
-    def open_file(self, path, start_page=0, keep_fileprovider=False):
+    def open_file(self, path, start_page=0, keep_fileprovider=False, folder_hint=_MISSING):
         """Open the file pointed to by <path>.
 
         If <start_page> is not set we set the current
@@ -179,10 +187,17 @@ class FileHandler(object):
         value of <start_page>. If <start_page> is non-positive it means the
         last image.
 
+        folder_hint: folder document URI from the portal file chooser (may be
+          None to clear, or a string to set, or omitted to preserve existing).
+
         Return True if the file is successfully loaded.
         """
 
         self._close()
+
+        if folder_hint is not _MISSING:
+            self._folder_hint_uri = folder_hint
+            log.debug('open_file: folder_hint=%s', folder_hint)
 
         # Convert any URI strings (e.g. smb://) to local POSIX paths before the
         # rest of the pipeline, which assumes os.path-compatible strings throughout.
@@ -304,6 +319,7 @@ class FileHandler(object):
     def close_file(self):
         """Close the currently opened file and its provider. """
         self._net_sibling_cache = None
+        self._folder_hint_uri = None
         self._close(close_provider=True)
 
     def _close(self, close_provider=False):
@@ -632,6 +648,85 @@ class FileHandler(object):
             'next': [parent.get_child(n).get_uri() for n in next_names],
         }
 
+    def _build_folder_doc_sibling_cache(self):
+        """Enumerate a portal folder document to build a sibling cache.
+
+        Used when _source_uri is None but _folder_hint_uri is set (Flatpak
+        portal file chooser case).  Tries the raw folder URI first; if that
+        fails and we are inside a Flatpak sandbox, remaps the external
+        /run/user/*/doc/ path to the sandbox-internal /run/flatpak/doc/ path.
+
+        Sets self._net_sibling_cache to None on any error.
+        """
+        from gi.repository import Gio
+
+        current_basename = os.path.basename(self._current_file)
+        log.debug('_build_folder_doc_sibling_cache: folder_hint=%s current=%s',
+                  self._folder_hint_uri, current_basename)
+
+        archive_exts = set()
+        for _, extensions in archive_tools.get_supported_formats().values():
+            archive_exts.update(ext.lower() for ext in extensions)
+
+        uris_to_try = [self._folder_hint_uri]
+        if (os.path.exists('/.flatpak-info') and
+                '/run/user/' in self._folder_hint_uri and '/doc/' in self._folder_hint_uri):
+            remapped = re.sub(r'/run/user/\d+/doc/', '/run/flatpak/doc/', self._folder_hint_uri)
+            if remapped != self._folder_hint_uri:
+                uris_to_try.append(remapped)
+                log.debug('_build_folder_doc_sibling_cache: will also try remapped=%s', remapped)
+
+        enum_gfile = None
+        names = []
+        used_uri = None
+        for try_uri in uris_to_try:
+            gf = Gio.File.new_for_uri(try_uri)
+            try:
+                enumerator = gf.enumerate_children(
+                    'standard::name', Gio.FileQueryInfoFlags.NONE, None)
+                while True:
+                    info = enumerator.next_file(None)
+                    if info is None:
+                        break
+                    name = info.get_name()
+                    if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
+                        names.append(name)
+                enumerator.close(None)
+                log.debug('_build_folder_doc_sibling_cache: enumerated %s -> %d archives',
+                          try_uri, len(names))
+                enum_gfile = gf
+                used_uri = try_uri
+                break
+            except Exception as ex:
+                log.debug('_build_folder_doc_sibling_cache: enumerate %s failed: %s', try_uri, ex)
+
+        if not names or enum_gfile is None:
+            log.debug('_build_folder_doc_sibling_cache: no siblings found')
+            self._net_sibling_cache = None
+            return
+
+        tools.alphanumeric_sort(names)
+        log.debug('_build_folder_doc_sibling_cache: %d siblings, looking for %s',
+                  len(names), current_basename)
+        try:
+            idx = names.index(current_basename)
+        except ValueError:
+            log.debug('_build_folder_doc_sibling_cache: current not in list (first 5: %s)', names[:5])
+            self._net_sibling_cache = None
+            return
+
+        prev_names = list(reversed(names[max(0, idx - 10):idx]))
+        next_names = names[idx + 1:idx + 11]
+        log.debug('_build_folder_doc_sibling_cache: idx=%d prev=%s next=%s', idx, prev_names, next_names)
+        self._net_sibling_cache = {
+            '_type': 'folder_doc',
+            'folder_hint_uri': self._folder_hint_uri,
+            'current_basename': current_basename,
+            'parent_uri': used_uri,
+            'prev': [enum_gfile.get_child(n).get_uri() for n in prev_names],
+            'next': [enum_gfile.get_child(n).get_uri() for n in next_names],
+        }
+
     def _open_next_archive(self, *args):
         """Open the archive that comes directly after the currently loaded
         archive in that archive's directory listing, sorted alphabetically.
@@ -641,11 +736,12 @@ class FileHandler(object):
 
             # For network files the file provider only knows about the single
             # downloaded temp file; use GIO enumeration instead.
-            log.debug('_open_next_archive: _source_uri=%s', self._source_uri)
+            log.debug('_open_next_archive: _source_uri=%s _folder_hint_uri=%s',
+                      self._source_uri, self._folder_hint_uri)
             if self._source_uri:
                 cache = self._net_sibling_cache
                 if (cache is None or
-                        cache['current_uri'] != self._source_uri or
+                        cache.get('current_uri') != self._source_uri or
                         not cache['next']):
                     self._build_net_sibling_cache()
                     cache = self._net_sibling_cache
@@ -657,6 +753,36 @@ class FileHandler(object):
                     'parent_uri': cache['parent_uri'],
                     'current_uri': next_uri,
                     'prev': ([cache['current_uri']] + cache['prev'])[:10],
+                    'next': cache['next'][1:],
+                }
+                self._close()
+                self.open_file(next_uri)
+                return True
+
+            elif self._folder_hint_uri:
+                from gi.repository import Gio
+                current_basename = os.path.basename(self._current_file)
+                cache = self._net_sibling_cache
+                if (cache is None or
+                        cache.get('_type') != 'folder_doc' or
+                        cache.get('folder_hint_uri') != self._folder_hint_uri or
+                        cache.get('current_basename') != current_basename or
+                        not cache['next']):
+                    self._build_folder_doc_sibling_cache()
+                    cache = self._net_sibling_cache
+                if not cache or not cache['next']:
+                    log.debug('_open_next_archive: no next archive available (folder_doc)')
+                    return False
+                next_uri = cache['next'][0]
+                next_basename = Gio.File.new_for_uri(next_uri).get_basename()
+                parent_gfile = Gio.File.new_for_uri(cache['parent_uri'])
+                current_child_uri = parent_gfile.get_child(current_basename).get_uri()
+                self._net_sibling_cache = {
+                    '_type': 'folder_doc',
+                    'folder_hint_uri': self._folder_hint_uri,
+                    'current_basename': next_basename,
+                    'parent_uri': cache['parent_uri'],
+                    'prev': ([current_child_uri] + cache['prev'])[:10],
                     'next': cache['next'][1:],
                 }
                 self._close()
@@ -685,11 +811,12 @@ class FileHandler(object):
 
             # For network files the file provider only knows about the single
             # downloaded temp file; use GIO enumeration instead.
-            log.debug('_open_previous_archive: _source_uri=%s', self._source_uri)
+            log.debug('_open_previous_archive: _source_uri=%s _folder_hint_uri=%s',
+                      self._source_uri, self._folder_hint_uri)
             if self._source_uri:
                 cache = self._net_sibling_cache
                 if (cache is None or
-                        cache['current_uri'] != self._source_uri or
+                        cache.get('current_uri') != self._source_uri or
                         not cache['prev']):
                     self._build_net_sibling_cache()
                     cache = self._net_sibling_cache
@@ -702,6 +829,36 @@ class FileHandler(object):
                     'current_uri': prev_uri,
                     'prev': cache['prev'][1:],
                     'next': ([cache['current_uri']] + cache['next'])[:10],
+                }
+                self._close()
+                self.open_file(prev_uri, prefs['open first file in prev archive'] - 1)
+                return True
+
+            elif self._folder_hint_uri:
+                from gi.repository import Gio
+                current_basename = os.path.basename(self._current_file)
+                cache = self._net_sibling_cache
+                if (cache is None or
+                        cache.get('_type') != 'folder_doc' or
+                        cache.get('folder_hint_uri') != self._folder_hint_uri or
+                        cache.get('current_basename') != current_basename or
+                        not cache['prev']):
+                    self._build_folder_doc_sibling_cache()
+                    cache = self._net_sibling_cache
+                if not cache or not cache['prev']:
+                    log.debug('_open_previous_archive: no prev archive available (folder_doc)')
+                    return False
+                prev_uri = cache['prev'][0]
+                prev_basename = Gio.File.new_for_uri(prev_uri).get_basename()
+                parent_gfile = Gio.File.new_for_uri(cache['parent_uri'])
+                current_child_uri = parent_gfile.get_child(current_basename).get_uri()
+                self._net_sibling_cache = {
+                    '_type': 'folder_doc',
+                    'folder_hint_uri': self._folder_hint_uri,
+                    'current_basename': prev_basename,
+                    'parent_uri': cache['parent_uri'],
+                    'prev': cache['prev'][1:],
+                    'next': ([current_child_uri] + cache['next'])[:10],
                 }
                 self._close()
                 self.open_file(prev_uri, prefs['open first file in prev archive'] - 1)

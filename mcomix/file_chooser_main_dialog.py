@@ -214,8 +214,15 @@ class _MainFileChooserDialog:
 
             _close_main_filechooser_dialog()
 
+            # Pass the folder document URI as a hint so file_handler can
+            # enumerate sibling archives for next/prev navigation.
+            # Only set when the folder is a portal document (no direct SMB
+            # path available); for plain local folders _source_uri handles it.
+            folder_hint = folder_uri if is_folder_doc_portal else None
+            log.debug('file chooser response: folder_hint=%s', folder_hint)
+
             files = paths if len(paths) > 1 else paths[0]
-            self._window.filehandler.open_file(files)
+            self._window.filehandler.open_file(files, folder_hint=folder_hint)
         else:
             _close_main_filechooser_dialog()
 
