@@ -5,6 +5,25 @@ on:
   pull_request:
 
 jobs:
+  check-manifest:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify manifest pins current base-branch HEAD
+        run: |
+          pinned=$(grep -A3 'url: https://github.com/bmfrosty/mcomix.git' \
+            io.github.bmfrosty.mcomix.yml | grep 'commit:' | awk '{print $2}')
+          base_head=$(git rev-parse origin/${{ github.base_ref }})
+          if [ "$pinned" != "$base_head" ]; then
+            echo "::error::Manifest pins mcomix at ${pinned:0:8} but \
+${{ github.base_ref }} HEAD is ${base_head:0:8}. \
+Update the commit in io.github.bmfrosty.mcomix.yml to: $base_head"
+            exit 1
+          fi
+
   build:
     runs-on: ubuntu-latest
     container:
