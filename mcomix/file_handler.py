@@ -169,81 +169,20 @@ class FileHandler(object):
                   len(basename_to_uri), len(doc_ids))
         return basename_to_uri
 
-    @staticmethod
-    def _is_fuse_network_path(path):
-        """Return True for paths that are FUSE-backed network locations.
-
-        These include document-portal mounts (Flatpak) and GVFS mounts.
-        They look like local POSIX paths but every read may trigger a network
-        round-trip, so archives at these paths should be copied to real local
-        storage before the extractor opens them.
-        """
-        return (
-            ('/run/user/' in path and '/doc/' in path) or
-            path.startswith('/run/flatpak/doc/') or
-            ('/run/user/' in path and '/gvfs/' in path)
-        )
-
-    def _copy_to_net_tmp(self, src_path):
-        """Copy a file from a FUSE/network path to the per-open temp dir.
-
-        The copy is synchronous (blocks the GTK thread) but is a single
-        sequential read, which is far faster than the many random seeks that
-        zipfile.ZipFile would otherwise make over the FUSE mount.  We show
-        a WAIT cursor and flush the display so the spinner appears during the
-        transfer.
-
-        Returns the local tmp path on success, or None on failure (in which
-        case the caller should fall back to using the original path).
-        """
-        if self._net_tmp_dir is None:
-            self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
-        basename = os.path.basename(src_path)
-        tmp_path = os.path.join(self._net_tmp_dir, basename)
-        log.debug('_copy_to_net_tmp: %s -> %s', src_path, tmp_path)
-
-        try:
-            self._window.cursor_handler.set_cursor_type(constants.WAIT_CURSOR)
-            from gi.repository import Gdk
-            Gdk.Display.get_default().flush()
-        except Exception:
-            pass
-
-        try:
-            shutil.copy2(src_path, tmp_path)
-            log.debug('_copy_to_net_tmp: done (%d bytes)', os.path.getsize(tmp_path))
-            return tmp_path
-        except Exception as ex:
-            log.error('Could not copy archive to local tmp: %s', ex)
-            return None
-        finally:
-            try:
-                self._window.cursor_handler.set_cursor_type(constants.NORMAL_CURSOR)
-            except Exception:
-                pass
-
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
 
-        For GIO locations with a local POSIX mount the local path is returned.
-        For truly non-local URIs (smb://, sftp://…) the file is copied to a
-        per-open temp dir so the rest of the pipeline can work on a local path.
-
-        FUSE-backed network paths (document-portal, GVFS) also get copied to
-        local temp: they look like local files but random reads on a ZIP go
-        over the network on every seek, making extraction ~1-2s per page.
-        Copying once gives fast local reads for the whole session.
+        For GIO locations that have a local POSIX mount (e.g. GVFS smb
+        mounts under /run/user/*/gvfs/…) the local path is returned directly.
+        For truly non-local URIs the file is copied to a per-open temp dir
+        so the rest of the pipeline can work on a normal local path.
 
         Returns the same structure (string or list) as was passed in.
         """
         if isinstance(path, list):
             return [self._resolve_uri(p) for p in path]
         if '://' not in path:
-            # Plain POSIX path — may still be a FUSE network mount.
-            if self._is_fuse_network_path(path):
-                tmp = self._copy_to_net_tmp(path)
-                if tmp:
-                    return tmp
+            # Plain POSIX path (including doc-portal FUSE paths).
             return path
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
@@ -251,18 +190,15 @@ class FileHandler(object):
         local = gfile.get_path()
         if local:
             log.debug('_resolve_uri: resolved to local path=%s', local)
-            original_local = local
-            if self._is_fuse_network_path(local):
-                # Copy FUSE-backed local path to real local storage.
-                tmp = self._copy_to_net_tmp(local)
-                if tmp:
-                    local = tmp
             if not path.startswith('file://'):
-                # Non-file URI (smb://, sftp://) — remember it for sibling nav.
+                # Non-file URI (smb://, sftp://, …) with a GVFS local path —
+                # store the original URI so GIO can enumerate the remote dir.
                 self._source_uri = path
                 log.debug('_resolve_uri: set _source_uri=%s', path)
-            elif '/run/user/' in original_local and '/gvfs/' in original_local:
-                # file:// URI resolving to a GVFS path.
+            elif '/run/user/' in local and '/gvfs/' in local:
+                # file:// URI resolving to a GVFS path (navigation step after
+                # readlink recovered the real path).  Keep it as _source_uri so
+                # subsequent prev/next presses continue to enumerate the same dir.
                 self._source_uri = path
                 log.debug('_resolve_uri: GVFS file:// URI -> _source_uri=%s', path)
             return local
@@ -276,6 +212,8 @@ class FileHandler(object):
             gfile.copy(dest, Gio.FileCopyFlags.OVERWRITE, None, None, None)
         except Exception as ex:
             raise IOError(_('Could not copy remote file "%s": %s') % (path, str(ex)))
+        # Remember the original URI so next/prev archive can enumerate the
+        # remote parent directory rather than the single-file temp dir.
         self._source_uri = path
         log.debug('_resolve_uri: no local path, copied to tmp=%s, _source_uri=%s', tmp_path, path)
         return tmp_path
