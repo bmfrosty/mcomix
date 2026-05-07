@@ -117,84 +117,57 @@ class FileHandler(object):
         log.debug('_scan_fds: no backing path found')
         return None
 
-    def _diag_sandbox_doc_path(self):
-        """Diagnostic: query GIO attributes and enumerate /run/flatpak/doc/.
+    def _collect_granted_doc_archives(self):
+        """Return a dict mapping archive basename → GIO URI for every archive
+        file in every document the portal has granted to this app.
 
-        Runs once after a doc-portal file opens to probe whether:
-        - The sandbox-internal /run/flatpak/doc/<id>/file path exposes a
-          standard::target-uri pointing back to the smb:// source.
-        - /run/flatpak/doc/ (the full doc directory) can be enumerated,
-          and what documents (and archive files) are listed there.
+        Inside the Flatpak sandbox the document portal mounts all granted
+        documents under /run/flatpak/doc/<doc-id>/<filename>.  Enumerating
+        that root gives us every file the user has opened via the file chooser
+        in past sessions, which we use as the sibling list for next/prev
+        archive navigation when a full remote directory listing is unavailable.
         """
         from gi.repository import Gio
 
-        # 1. Probe the sandbox-internal path of the current file.
-        sandbox_path = re.sub(r'^/run/user/\d+/doc/', '/run/flatpak/doc/', self._current_file)
-        log.debug('_diag: sandbox_path=%s', sandbox_path)
-        gf = Gio.File.new_for_path(sandbox_path)
-        try:
-            info = gf.query_info('standard::*,xattr::*', Gio.FileQueryInfoFlags.NONE, None)
-            attrs = {}
-            for attr in info.list_attributes(None):
-                try:
-                    attrs[attr] = info.get_attribute_as_string(attr)
-                except Exception:
-                    pass
-            log.debug('_diag: sandbox file GIO attrs: %s', attrs)
-        except Exception as ex:
-            log.debug('_diag: sandbox file query_info failed: %s', ex)
+        archive_exts = set()
+        for _, exts in archive_tools.get_supported_formats().values():
+            archive_exts.update(e.lower() for e in exts)
 
-        # 2. Probe the parent directory inside /run/flatpak/doc/<id>/.
-        sandbox_dir = os.path.dirname(sandbox_path)
-        gd = Gio.File.new_for_path(sandbox_dir)
+        doc_root = Gio.File.new_for_path('/run/flatpak/doc')
+        basename_to_uri = {}
         try:
-            info = gd.query_info('standard::*', Gio.FileQueryInfoFlags.NONE, None)
-            attrs = {}
-            for attr in info.list_attributes(None):
-                try:
-                    attrs[attr] = info.get_attribute_as_string(attr)
-                except Exception:
-                    pass
-            log.debug('_diag: sandbox dir GIO attrs: %s', attrs)
-        except Exception as ex:
-            log.debug('_diag: sandbox dir query_info failed: %s', ex)
-
-        # 3. Enumerate /run/flatpak/doc/ — lists all granted doc IDs.
-        flatpak_doc_root = '/run/flatpak/doc'
-        gr = Gio.File.new_for_path(flatpak_doc_root)
-        try:
-            enumerator = gr.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, None)
+            doc_enum = doc_root.enumerate_children(
+                'standard::name', Gio.FileQueryInfoFlags.NONE, None)
             doc_ids = []
             while True:
-                info = enumerator.next_file(None)
+                info = doc_enum.next_file(None)
                 if info is None:
                     break
                 doc_ids.append(info.get_name())
-            enumerator.close(None)
-            log.debug('_diag: /run/flatpak/doc has %d doc entries: %s', len(doc_ids), doc_ids)
-
-            # For each doc, list archive files and try to get their target-uri.
-            archive_exts = set()
-            for _, exts in archive_tools.get_supported_formats().values():
-                archive_exts.update(e.lower() for e in exts)
-            for doc_id in doc_ids:
-                doc_gf = gr.get_child(doc_id)
-                try:
-                    de = doc_gf.enumerate_children(
-                        'standard::name,standard::target-uri', Gio.FileQueryInfoFlags.NONE, None)
-                    while True:
-                        fi = de.next_file(None)
-                        if fi is None:
-                            break
-                        name = fi.get_name()
-                        target = fi.get_attribute_as_string('standard::target-uri') or ''
-                        if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
-                            log.debug('_diag: doc/%s/%s target-uri=%s', doc_id, name, target)
-                    de.close(None)
-                except Exception as ex:
-                    log.debug('_diag: enumerate doc/%s failed: %s', doc_id, ex)
+            doc_enum.close(None)
         except Exception as ex:
-            log.debug('_diag: enumerate /run/flatpak/doc failed: %s', ex)
+            log.debug('_collect_granted_doc_archives: enumerate /run/flatpak/doc failed: %s', ex)
+            return basename_to_uri
+
+        for doc_id in doc_ids:
+            doc_gf = doc_root.get_child(doc_id)
+            try:
+                fe = doc_gf.enumerate_children(
+                    'standard::name', Gio.FileQueryInfoFlags.NONE, None)
+                while True:
+                    fi = fe.next_file(None)
+                    if fi is None:
+                        break
+                    name = fi.get_name()
+                    if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
+                        basename_to_uri[name] = doc_gf.get_child(name).get_uri()
+                fe.close(None)
+            except Exception as ex:
+                log.debug('_collect_granted_doc_archives: enumerate doc/%s failed: %s', doc_id, ex)
+
+        log.debug('_collect_granted_doc_archives: %d archive files in %d docs',
+                  len(basename_to_uri), len(doc_ids))
+        return basename_to_uri
 
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
@@ -328,8 +301,6 @@ class FileHandler(object):
                     from gi.repository import Gio
                     self._source_uri = Gio.File.new_for_path(backing).get_uri()
                     log.debug('open_file: fd-scan backing path -> _source_uri=%s', self._source_uri)
-                # Diagnostic: query GIO attributes on the sandbox-internal doc path.
-                self._diag_sandbox_doc_path()
             self.file_loading = True
         else:
             image_files, current_image_index = \
@@ -730,93 +701,52 @@ class FileHandler(object):
         }
 
     def _build_folder_doc_sibling_cache(self):
-        """Enumerate a portal folder document to build a sibling cache.
+        """Build a sibling cache from all archives the portal has granted.
 
-        Used when _source_uri is None but _folder_hint_uri is set (Flatpak
-        portal file chooser case).  Tries the raw folder URI first; if that
-        fails and we are inside a Flatpak sandbox, remaps the external
-        /run/user/*/doc/ path to the sandbox-internal /run/flatpak/doc/ path.
+        Inside the Flatpak sandbox, /run/flatpak/doc/ contains one subdirectory
+        per document the portal has granted to this app — i.e. every archive
+        the user has opened via the file chooser across all sessions.  We
+        enumerate all of them, sort alphabetically, and use that as the sibling
+        list for next/prev navigation.
 
-        Sets self._net_sibling_cache to None on any error.
+        This gives navigation among previously-opened archives from the same
+        remote share.  The list grows as the user opens more archives.
         """
-        from gi.repository import Gio
-
         current_basename = os.path.basename(self._current_file)
-        log.debug('_build_folder_doc_sibling_cache: folder_hint=%s current=%s',
-                  self._folder_hint_uri, current_basename)
+        log.debug('_build_folder_doc_sibling_cache: current=%s', current_basename)
 
-        archive_exts = set()
-        for _, extensions in archive_tools.get_supported_formats().values():
-            archive_exts.update(ext.lower() for ext in extensions)
+        basename_to_uri = self._collect_granted_doc_archives()
 
-        uris_to_try = [self._folder_hint_uri]
-        if (os.path.exists('/.flatpak-info') and
-                '/run/user/' in self._folder_hint_uri and '/doc/' in self._folder_hint_uri):
-            remapped = re.sub(r'/run/user/\d+/doc/', '/run/flatpak/doc/', self._folder_hint_uri)
-            if remapped != self._folder_hint_uri:
-                uris_to_try.append(remapped)
-                log.debug('_build_folder_doc_sibling_cache: will also try remapped=%s', remapped)
-
-        enum_gfile = None
-        names = []
-        used_uri = None
-        for try_uri in uris_to_try:
-            gf = Gio.File.new_for_uri(try_uri)
-            try:
-                enumerator = gf.enumerate_children(
-                    'standard::name', Gio.FileQueryInfoFlags.NONE, None)
-                while True:
-                    info = enumerator.next_file(None)
-                    if info is None:
-                        break
-                    name = info.get_name()
-                    if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
-                        names.append(name)
-                enumerator.close(None)
-                log.debug('_build_folder_doc_sibling_cache: enumerated %s -> %d archives',
-                          try_uri, len(names))
-                enum_gfile = gf
-                used_uri = try_uri
-                break
-            except Exception as ex:
-                log.debug('_build_folder_doc_sibling_cache: enumerate %s failed: %s', try_uri, ex)
-
-        # Store a valid-but-empty cache even on failure so callers don't
-        # re-enumerate the remote folder on every keypress.
         _empty = {
             '_type': 'folder_doc',
             'folder_hint_uri': self._folder_hint_uri,
             'current_basename': current_basename,
-            'parent_uri': None,
+            'basename_to_uri': {},
             'prev': [],
             'next': [],
         }
 
-        if not names or enum_gfile is None:
-            log.debug('_build_folder_doc_sibling_cache: no siblings found')
+        if current_basename not in basename_to_uri:
+            log.debug('_build_folder_doc_sibling_cache: current not in granted docs')
             self._net_sibling_cache = _empty
             return
 
+        names = list(basename_to_uri.keys())
         tools.alphanumeric_sort(names)
-        log.debug('_build_folder_doc_sibling_cache: %d siblings, looking for %s',
-                  len(names), current_basename)
-        try:
-            idx = names.index(current_basename)
-        except ValueError:
-            log.debug('_build_folder_doc_sibling_cache: current not in list (first 5: %s)', names[:5])
-            self._net_sibling_cache = _empty
-            return
+        log.debug('_build_folder_doc_sibling_cache: %d granted archives, current at idx %d',
+                  len(names), names.index(current_basename))
 
+        idx = names.index(current_basename)
         prev_names = list(reversed(names[max(0, idx - 10):idx]))
         next_names = names[idx + 1:idx + 11]
-        log.debug('_build_folder_doc_sibling_cache: idx=%d prev=%s next=%s', idx, prev_names, next_names)
+        log.debug('_build_folder_doc_sibling_cache: prev=%s next=%s', prev_names, next_names)
         self._net_sibling_cache = {
             '_type': 'folder_doc',
             'folder_hint_uri': self._folder_hint_uri,
             'current_basename': current_basename,
-            'parent_uri': used_uri,
-            'prev': [enum_gfile.get_child(n).get_uri() for n in prev_names],
-            'next': [enum_gfile.get_child(n).get_uri() for n in next_names],
+            'basename_to_uri': basename_to_uri,
+            'prev': [basename_to_uri[n] for n in prev_names],
+            'next': [basename_to_uri[n] for n in next_names],
         }
 
     def _open_next_archive(self, *args):
@@ -855,11 +785,13 @@ class FileHandler(object):
                 from gi.repository import Gio
                 current_basename = os.path.basename(self._current_file)
                 cache = self._net_sibling_cache
-                if (cache is None or
-                        cache.get('_type') != 'folder_doc' or
-                        cache.get('folder_hint_uri') != self._folder_hint_uri or
-                        cache.get('current_basename') != current_basename or
-                        not cache['next']):
+                cache_stale = (
+                    cache is None or
+                    cache.get('_type') != 'folder_doc' or
+                    cache.get('folder_hint_uri') != self._folder_hint_uri or
+                    cache.get('current_basename') != current_basename
+                )
+                if cache_stale:
                     self._build_folder_doc_sibling_cache()
                     cache = self._net_sibling_cache
                 if not cache or not cache['next']:
@@ -867,13 +799,12 @@ class FileHandler(object):
                     return False
                 next_uri = cache['next'][0]
                 next_basename = Gio.File.new_for_uri(next_uri).get_basename()
-                parent_gfile = Gio.File.new_for_uri(cache['parent_uri'])
-                current_child_uri = parent_gfile.get_child(current_basename).get_uri()
+                current_child_uri = cache.get('basename_to_uri', {}).get(current_basename, '')
                 self._net_sibling_cache = {
                     '_type': 'folder_doc',
                     'folder_hint_uri': self._folder_hint_uri,
                     'current_basename': next_basename,
-                    'parent_uri': cache['parent_uri'],
+                    'basename_to_uri': cache.get('basename_to_uri', {}),
                     'prev': ([current_child_uri] + cache['prev'])[:10],
                     'next': cache['next'][1:],
                 }
@@ -930,11 +861,13 @@ class FileHandler(object):
                 from gi.repository import Gio
                 current_basename = os.path.basename(self._current_file)
                 cache = self._net_sibling_cache
-                if (cache is None or
-                        cache.get('_type') != 'folder_doc' or
-                        cache.get('folder_hint_uri') != self._folder_hint_uri or
-                        cache.get('current_basename') != current_basename or
-                        not cache['prev']):
+                cache_stale = (
+                    cache is None or
+                    cache.get('_type') != 'folder_doc' or
+                    cache.get('folder_hint_uri') != self._folder_hint_uri or
+                    cache.get('current_basename') != current_basename
+                )
+                if cache_stale:
                     self._build_folder_doc_sibling_cache()
                     cache = self._net_sibling_cache
                 if not cache or not cache['prev']:
@@ -942,13 +875,12 @@ class FileHandler(object):
                     return False
                 prev_uri = cache['prev'][0]
                 prev_basename = Gio.File.new_for_uri(prev_uri).get_basename()
-                parent_gfile = Gio.File.new_for_uri(cache['parent_uri'])
-                current_child_uri = parent_gfile.get_child(current_basename).get_uri()
+                current_child_uri = cache.get('basename_to_uri', {}).get(current_basename, '')
                 self._net_sibling_cache = {
                     '_type': 'folder_doc',
                     'folder_hint_uri': self._folder_hint_uri,
                     'current_basename': prev_basename,
-                    'parent_uri': cache['parent_uri'],
+                    'basename_to_uri': cache.get('basename_to_uri', {}),
                     'prev': cache['prev'][1:],
                     'next': ([current_child_uri] + cache['next'])[:10],
                 }
