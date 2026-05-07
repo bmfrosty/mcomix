@@ -22,6 +22,11 @@ finish-args:
   - --filesystem=xdg-desktop
   - --filesystem=/media
   - --filesystem=/run/media
+  # GVFS FUSE mounts (smb://, sftp://, …) for sibling-archive navigation.
+  # The portal file-chooser exposes chosen files via document-portal symlinks
+  # pointing into /run/user/*/gvfs/; this permission lets the app follow those
+  # symlinks and enumerate the containing directory.
+  - --filesystem=xdg-run/gvfs:ro
 
 cleanup:
   - /share/man
@@ -74,7 +79,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: cfff51d48e08f853f04ad6568ce09db6f7b855b6
+        commit: da727ac7a7f9c4d2176bbf8d3713dae0dd02e335
 
       - type: shell
         commands:

@@ -156,24 +156,57 @@ class _MainFileChooserDialog:
             except Exception:
                 pass
 
+            # Fetch the folder URI unconditionally — needed for "last browsed"
+            # pref and for the folder-document-portal sibling navigation below.
+            folder_uri = self._native.get_current_folder_uri() or ''
+            folder_gfile = Gio.File.new_for_uri(folder_uri)
+            folder_local = folder_gfile.get_path()
+            log.debug('file chooser response: folder_uri=%s folder_local=%s',
+                      folder_uri, folder_local)
+
             # Store the raw URI when the folder has no POSIX path so that
             # _restore_folder() can navigate back to a network location next time.
             if prefs['store recent file info']:
-                folder_uri = self._native.get_current_folder_uri() or ''
-                folder_gfile = Gio.File.new_for_uri(folder_uri)
-                local_folder = folder_gfile.get_path()
                 prefs['path of last browsed in filechooser'] = \
-                    local_folder if local_folder else folder_uri
+                    folder_local if folder_local else folder_uri
             else:
                 prefs['path of last browsed in filechooser'] = constants.HOME_DIR
 
-            # Prefer local POSIX path when GIO can resolve one; otherwise pass the
-            # raw URI so file_handler._resolve_uri() can copy it to a temp location.
+            # Build the list of paths/URIs to open.
+            #
+            # When the portal file chooser is used (Flatpak/portal sandbox), both
+            # the chosen file and its parent folder are surfaced as document-portal
+            # FUSE paths (/run/user/*/doc/<id>/…).  A single-file document gives
+            # access only to that one file, so the local file provider cannot list
+            # siblings for next/previous archive navigation.
+            #
+            # The FOLDER document (folder_local = /run/user/*/doc/<folder-id>)
+            # grants access to ALL files in the directory.  By constructing the
+            # path as folder_local/basename we give file_handler a path whose
+            # parent directory IS enumerable, enabling sibling navigation.
+            #
+            # For plain local files folder_local won't be a doc-portal path, so
+            # we fall through to the normal local-path behaviour.
+            is_folder_doc_portal = (folder_local and
+                                    '/run/user/' in folder_local and
+                                    '/doc/' in folder_local)
+            is_network_folder = (folder_uri and '://' in folder_uri and
+                                 not folder_uri.startswith('file://'))
+            log.debug('file chooser response: is_folder_doc_portal=%s is_network_folder=%s',
+                      is_folder_doc_portal, is_network_folder)
+
             paths = []
             for uri in uris:
                 gfile = Gio.File.new_for_uri(uri)
                 local = gfile.get_path()
-                paths.append(local if local else uri)
+                log.debug('file chooser response: uri=%s local=%s', uri, local)
+                if local and is_network_folder:
+                    # Direct network URI (non-portal case).
+                    net_uri = folder_gfile.get_child(gfile.get_basename()).get_uri()
+                    log.debug('file chooser response: network URI=%s', net_uri)
+                    paths.append(net_uri)
+                else:
+                    paths.append(local if local else uri)
 
             first_gfile = Gio.File.new_for_uri(uris[0])
             _MainFileChooserDialog._last_activated_file = \
@@ -181,8 +214,15 @@ class _MainFileChooserDialog:
 
             _close_main_filechooser_dialog()
 
+            # Pass the folder document URI as a hint so file_handler can
+            # enumerate sibling archives for next/prev navigation.
+            # Only set when the folder is a portal document (no direct SMB
+            # path available); for plain local folders _source_uri handles it.
+            folder_hint = folder_uri if is_folder_doc_portal else None
+            log.debug('file chooser response: folder_hint=%s', folder_hint)
+
             files = paths if len(paths) > 1 else paths[0]
-            self._window.filehandler.open_file(files)
+            self._window.filehandler.open_file(files, folder_hint=folder_hint)
         else:
             _close_main_filechooser_dialog()
 
