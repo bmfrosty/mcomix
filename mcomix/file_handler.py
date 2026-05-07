@@ -187,6 +187,9 @@ class FileHandler(object):
     def _copy_to_net_tmp(self, src_path):
         """Copy a file from a FUSE/network path to the per-open temp dir.
 
+        The copy runs in a background thread so the GTK main loop stays alive
+        (redraws, cursor updates, etc.) while the network transfer completes.
+
         Returns the local tmp path on success, or None on failure (in which
         case the caller should fall back to using the original path).
         """
@@ -194,14 +197,43 @@ class FileHandler(object):
             self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
         basename = os.path.basename(src_path)
         tmp_path = os.path.join(self._net_tmp_dir, basename)
-        log.debug('_resolve_uri: copying FUSE archive to local tmp=%s', tmp_path)
+        log.debug('_copy_to_net_tmp: copying FUSE archive to local tmp=%s', tmp_path)
+
+        result = [None]
+        error = [None]
+        done = threading.Event()
+
+        def do_copy():
+            try:
+                shutil.copy2(src_path, tmp_path)
+                result[0] = tmp_path
+            except Exception as ex:
+                error[0] = ex
+            finally:
+                done.set()
+
+        t = threading.Thread(target=do_copy, daemon=True)
+        t.start()
+
+        # Show a wait cursor and keep the GTK event loop alive while copying.
         try:
-            shutil.copy2(src_path, tmp_path)
-            log.debug('_resolve_uri: copy done (%d bytes)', os.path.getsize(tmp_path))
-            return tmp_path
-        except Exception as ex:
-            log.error('Could not copy archive to local tmp: %s', ex)
+            self._window.cursor_handler.set_cursor_type(constants.WAIT_CURSOR)
+        except Exception:
+            pass
+        while not done.is_set():
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+            done.wait(timeout=0.05)
+        try:
+            self._window.cursor_handler.set_cursor_type(constants.NORMAL_CURSOR)
+        except Exception:
+            pass
+
+        if error[0]:
+            log.error('Could not copy archive to local tmp: %s', error[0])
             return None
+        log.debug('_copy_to_net_tmp: copy done (%d bytes)', os.path.getsize(tmp_path))
+        return tmp_path
 
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
