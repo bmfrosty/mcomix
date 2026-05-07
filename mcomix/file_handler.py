@@ -83,77 +83,31 @@ class FileHandler(object):
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
 
-    def _diagnose_doc_portal(self, path):
-        """Log everything we can find about a document-portal path to determine
-        the best way to recover the real GVFS/network path for sibling nav."""
-        import glob, stat as stat_mod
+    def _scan_fds_for_backing_path(self, doc_portal_path):
+        """Scan /proc/self/fd/ for the real backing path of a document-portal file.
 
-        log.debug('=== doc-portal diagnostic for %s ===', path)
+        When the kernel uses FUSE passthrough mode (Linux 5.16+) the file
+        descriptor obtained by open()-ing a FUSE file points directly to the
+        backing file rather than the FUSE path.  In that case readlink on the
+        /proc/self/fd/<n> entry reveals the real path (e.g. an smb:// location
+        cached by the portal daemon) which we can use for sibling enumeration.
 
-        # 1. stat
-        try:
-            st = os.stat(path)
-            log.debug('stat: ino=%d dev=%d size=%d', st.st_ino, st.st_dev, st.st_size)
-        except Exception as e:
-            log.debug('stat failed: %s', e)
-
-        # 2. xattrs
-        try:
-            attrs = os.listxattr(path)
-            log.debug('xattrs: %s', attrs)
-            for attr in attrs:
-                try:
-                    log.debug('  xattr %s = %r', attr, os.getxattr(path, attr))
-                except Exception as e:
-                    log.debug('  xattr %s error: %s', attr, e)
-        except Exception as e:
-            log.debug('listxattr failed: %s', e)
-
-        # 3. GIO query_info — all attributes
-        try:
-            from gi.repository import Gio
-            gfile = Gio.File.new_for_path(path)
-            info = gfile.query_info('*', Gio.FileQueryInfoFlags.NONE, None)
-            for attr in (info.list_attributes(None) or []):
-                log.debug('  gio attr %s = %s', attr, info.get_attribute_as_string(attr))
-        except Exception as e:
-            log.debug('query_info failed: %s', e)
-
-        # 4. /proc/self/fd — look for any open fd that resolves to a GVFS path
-        #    with the same basename (FUSE passthrough exposes the real backing path)
-        basename = os.path.basename(path)
-        for fd_link in glob.glob('/proc/self/fd/*'):
+        Returns the backing path string, or None if not found.
+        """
+        import glob
+        basename = os.path.basename(doc_portal_path)
+        log.debug('_scan_fds: looking for fd with basename=%s', basename)
+        for fd_link in sorted(glob.glob('/proc/self/fd/*')):
             try:
                 target = os.readlink(fd_link)
-                if os.path.basename(target) == basename:
-                    log.debug('proc/fd match: %s -> %s', fd_link, target)
+                log.debug('_scan_fds: %s -> %s', fd_link, target)
+                if os.path.basename(target) == basename and target != doc_portal_path:
+                    log.debug('_scan_fds: backing path found: %s', target)
+                    return target
             except OSError:
                 pass
-
-        # 5. GVFS directory listing — find mounts that contain our filename
-        gvfs_root = '/run/user/%d/gvfs' % os.getuid()
-        if os.path.isdir(gvfs_root):
-            log.debug('GVFS mounts: %s', os.listdir(gvfs_root))
-            for mount in os.listdir(gvfs_root):
-                mount_path = os.path.join(gvfs_root, mount)
-                try:
-                    # Walk top two levels looking for basename match
-                    for entry in os.listdir(mount_path):
-                        if entry == basename:
-                            log.debug('GVFS match (top): %s/%s', mount_path, entry)
-                        sub = os.path.join(mount_path, entry)
-                        if os.path.isdir(sub):
-                            try:
-                                if basename in os.listdir(sub):
-                                    log.debug('GVFS match (sub): %s/%s', sub, basename)
-                            except OSError:
-                                pass
-                except OSError:
-                    pass
-        else:
-            log.debug('GVFS root %s not accessible', gvfs_root)
-
-        log.debug('=== end doc-portal diagnostic ===')
+        log.debug('_scan_fds: no backing path found')
+        return None
 
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
@@ -171,7 +125,7 @@ class FileHandler(object):
             # Plain POSIX path.  If it's a document-portal path
             # (/run/user/*/doc/<id>/…) try to recover the real GVFS path.
             if '/run/user/' in path and '/doc/' in path:
-                self._diagnose_doc_portal(path)
+                log.debug('_resolve_uri: doc-portal path (fd scan will run after archive opens)')
             return path
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
@@ -271,6 +225,15 @@ class FileHandler(object):
                 self._window.osd.show(str(ex))
                 self.file_opened()
                 return False
+            # After the archive is open its file descriptor is live.  If the
+            # file came from the document portal and we have no _source_uri yet,
+            # check /proc/self/fd/ for a FUSE-passthrough backing path.
+            if not self._source_uri and '/run/user/' in self._current_file and '/doc/' in self._current_file:
+                backing = self._scan_fds_for_backing_path(self._current_file)
+                if backing and '/doc/' not in backing:
+                    from gi.repository import Gio
+                    self._source_uri = Gio.File.new_for_path(backing).get_uri()
+                    log.debug('open_file: fd-scan backing path -> _source_uri=%s', self._source_uri)
             self.file_loading = True
         else:
             image_files, current_image_index = \
