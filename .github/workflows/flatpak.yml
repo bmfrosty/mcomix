@@ -11,6 +11,8 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v4
+      - name: Lint manifest
+        run: flatpak-builder-lint manifest io.github.bmfrosty.mcomix.yml
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: io.github.bmfrosty.mcomix.flatpak
