@@ -70,6 +70,11 @@ class FileHandler(object):
         #: navigation can enumerate the remote parent directory instead of the
         #: local temp dir (which only ever contains the one downloaded file).
         self._source_uri = None
+        #: Sliding window cache for remote directory navigation.
+        #: Dict with keys: parent_uri, current_uri, prev (list, closest-first,
+        #: up to 10), next (list, closest-first, up to 10).  Avoids re-enumerating
+        #: a large remote directory on every prev/next keypress.
+        self._net_sibling_cache = None
         #: Keeps track of the last read page in archives
         self.last_read_page = last_read_page.LastReadPage(backend.LibraryBackend())
         #: Regexp used for determining which archive files are comment files.
@@ -245,6 +250,7 @@ class FileHandler(object):
 
     def close_file(self):
         """Close the currently opened file and its provider. """
+        self._net_sibling_cache = None
         self._close(close_provider=True)
 
     def _close(self, close_provider=False):
@@ -508,17 +514,16 @@ class FileHandler(object):
 
         return self._window.imagehandler.get_pretty_current_filename()
 
-    def _network_archive_siblings(self):
-        """Return a sorted list of archive URIs in the same remote directory as
-        the currently open file, using GIO to enumerate the parent.
+    def _build_net_sibling_cache(self):
+        """Enumerate the remote parent directory once and store a ±10 window
+        of archive URIs around self._source_uri in self._net_sibling_cache.
 
-        Only called when self._source_uri is set (i.e. the current file was
-        downloaded from a non-local URI).  Returns an empty list on any error.
+        The window shifts cheaply on each prev/next press; re-enumeration only
+        happens when the user navigates more than 10 steps from the last
+        enumeration point.  Sets self._net_sibling_cache to None on any error.
         """
         from gi.repository import Gio
 
-        # Build the set of known archive extensions for filename-based filtering
-        # (we can't read file content remotely just to detect the type).
         archive_exts = set()
         for mime_types, extensions in archive_tools.get_supported_formats().values():
             archive_exts.update(ext.lower() for ext in extensions)
@@ -526,13 +531,15 @@ class FileHandler(object):
         gfile = Gio.File.new_for_uri(self._source_uri)
         parent = gfile.get_parent()
         if parent is None:
-            return []
+            self._net_sibling_cache = None
+            return
         try:
             enumerator = parent.enumerate_children(
                 'standard::name', Gio.FileQueryInfoFlags.NONE, None)
         except Exception as ex:
             log.error('Could not list remote directory for archive navigation: %s', ex)
-            return []
+            self._net_sibling_cache = None
+            return
 
         names = []
         while True:
@@ -545,7 +552,23 @@ class FileHandler(object):
         enumerator.close(None)
 
         tools.alphanumeric_sort(names)
-        return [parent.get_child(name).get_uri() for name in names]
+
+        current_name = gfile.get_basename()
+        try:
+            idx = names.index(current_name)
+        except ValueError:
+            self._net_sibling_cache = None
+            return
+
+        parent_uri = parent.get_uri()
+        prev_names = list(reversed(names[max(0, idx - 10):idx]))
+        next_names = names[idx + 1:idx + 11]
+        self._net_sibling_cache = {
+            'parent_uri': parent_uri,
+            'current_uri': self._source_uri,
+            'prev': [parent.get_child(n).get_uri() for n in prev_names],
+            'next': [parent.get_child(n).get_uri() for n in next_names],
+        }
 
     def _open_next_archive(self, *args):
         """Open the archive that comes directly after the currently loaded
@@ -557,17 +580,24 @@ class FileHandler(object):
             # For network files the file provider only knows about the single
             # downloaded temp file; use GIO enumeration instead.
             if self._source_uri:
-                siblings = self._network_archive_siblings()
-                current_uri = self._source_uri
-                try:
-                    idx = siblings.index(current_uri)
-                except ValueError:
+                cache = self._net_sibling_cache
+                if (cache is None or
+                        cache['current_uri'] != self._source_uri or
+                        not cache['next']):
+                    self._build_net_sibling_cache()
+                    cache = self._net_sibling_cache
+                if not cache or not cache['next']:
                     return False
-                for uri in siblings[idx + 1:]:
-                    self._close()
-                    self.open_file(uri)
-                    return True
-                return False
+                next_uri = cache['next'][0]
+                self._net_sibling_cache = {
+                    'parent_uri': cache['parent_uri'],
+                    'current_uri': next_uri,
+                    'prev': ([cache['current_uri']] + cache['prev'])[:10],
+                    'next': cache['next'][1:],
+                }
+                self._close()
+                self.open_file(next_uri)
+                return True
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
@@ -592,17 +622,24 @@ class FileHandler(object):
             # For network files the file provider only knows about the single
             # downloaded temp file; use GIO enumeration instead.
             if self._source_uri:
-                siblings = self._network_archive_siblings()
-                current_uri = self._source_uri
-                try:
-                    idx = siblings.index(current_uri)
-                except ValueError:
+                cache = self._net_sibling_cache
+                if (cache is None or
+                        cache['current_uri'] != self._source_uri or
+                        not cache['prev']):
+                    self._build_net_sibling_cache()
+                    cache = self._net_sibling_cache
+                if not cache or not cache['prev']:
                     return False
-                for uri in reversed(siblings[:idx]):
-                    self._close()
-                    self.open_file(uri, prefs['open first file in prev archive'] - 1)
-                    return True
-                return False
+                prev_uri = cache['prev'][0]
+                self._net_sibling_cache = {
+                    'parent_uri': cache['parent_uri'],
+                    'current_uri': prev_uri,
+                    'prev': cache['prev'][1:],
+                    'next': ([cache['current_uri']] + cache['next'])[:10],
+                }
+                self._close()
+                self.open_file(prev_uri, prefs['open first file in prev archive'] - 1)
+                return True
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
