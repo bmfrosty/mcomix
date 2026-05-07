@@ -1,4 +1,4 @@
-app-id: org.catbus.mcomix
+app-id: io.github.bmfrosty.mcomix
 runtime: org.freedesktop.Platform
 runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
@@ -15,8 +15,6 @@ finish-args:
   - --socket=pulseaudio
   - --device=dri
   - --env=TMPDIR=/var/tmp
-  # Network filesystem access via the file chooser portal (SMB, SFTP, etc.)
-  - --talk-name=org.freedesktop.portal.FileChooser
   # Local filesystem access for the built-in file chooser fallback
   - --filesystem=xdg-documents
   - --filesystem=xdg-download
@@ -76,7 +74,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        branch: main
+        commit: fa4cf42568b85bfb5b5cf2eed9ba725b689cdd21
 
       - type: shell
         commands:

@@ -13,6 +13,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
-          bundle: org.catbus.mcomix.flatpak
-          manifest-path: org.catbus.mcomix.yml
+          bundle: io.github.bmfrosty.mcomix.flatpak
+          manifest-path: io.github.bmfrosty.mcomix.yml
           cache-key: flatpak-builder-${{ github.sha }}
