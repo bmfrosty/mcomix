@@ -83,6 +83,95 @@ class FileHandler(object):
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
 
+    def _gvfs_path_to_uri(self, backend, rel_path):
+        """Convert a GVFS backend token + relative path to a network URI.
+
+        Examples:
+          'smb-share:server=HOST,share=SHARE' + 'dir/file' → 'smb://HOST/SHARE/dir/file'
+          'sftp:host=HOST,user=USER'           + 'dir/file' → 'sftp://USER@HOST/dir/file'
+        Returns None for unrecognised backend formats.
+        """
+        import urllib.parse
+        params = dict(kv.split('=', 1) for kv in backend.split(':',1)[-1].split(',') if '=' in kv)
+        encoded = urllib.parse.quote(rel_path, safe='/')
+        if backend.startswith('smb-share:'):
+            server = params.get('server', '')
+            share  = params.get('share', '')
+            if server and share:
+                return 'smb://%s/%s/%s' % (server, share, encoded)
+        elif backend.startswith('sftp:'):
+            host = params.get('host', '')
+            user = params.get('user', '')
+            if host:
+                authority = '%s@%s' % (user, host) if user else host
+                return 'sftp://%s/%s' % (authority, encoded)
+        return None
+
+    def _doc_portal_real_uri(self, doc_portal_path):
+        """Return the real network URI for a document-portal path.
+
+        The GNOME portal file chooser wraps chosen files in a per-process
+        document portal FUSE mount at /run/user/<uid>/doc/<id>/.  The portal
+        hides the original smb:// (or other) URI from the app.  We recover it
+        by querying org.freedesktop.portal.Documents.Info() over DBus, which
+        returns the real host-side path (typically a GVFS path under
+        /run/user/<uid>/gvfs/<backend>/<rel>), and then convert that to the
+        corresponding network URI so GIO can enumerate sibling archives.
+
+        Returns None if the path is not a document-portal path or on any error.
+        """
+        import re
+        m = re.match(r'^/run/user/\d+/doc/([0-9a-f]+)/', doc_portal_path)
+        if not m:
+            return None
+        doc_id = m.group(1)
+        try:
+            from gi.repository import Gio, GLib
+            proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                'org.freedesktop.portal.Documents',
+                '/org/freedesktop/portal/documents',
+                'org.freedesktop.portal.Documents',
+                None,
+            )
+            result = proxy.call_sync(
+                'Info',
+                GLib.Variant('(s)', (doc_id,)),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+            )
+            # Signature: (ay path, a{sv} apps, u flags)
+            raw = result.get_child_value(0)  # ay
+            real_path = bytes(
+                raw.get_child_value(i).get_byte()
+                for i in range(raw.n_children())
+                if raw.get_child_value(i).get_byte() != 0
+            ).decode('utf-8', errors='replace')
+            log.debug('_doc_portal_real_uri: doc_id=%s real_path=%s', doc_id, real_path)
+        except Exception as ex:
+            log.debug('_doc_portal_real_uri: DBus query failed: %s', ex)
+            return None
+
+        if not real_path:
+            return None
+
+        # Convert GVFS path → network URI when possible.
+        import re as _re
+        gvfs_m = _re.match(r'^/run/user/\d+/gvfs/([^/]+)/(.*)$', real_path)
+        if gvfs_m:
+            net_uri = self._gvfs_path_to_uri(gvfs_m.group(1), gvfs_m.group(2))
+            if net_uri:
+                log.debug('_doc_portal_real_uri: network URI=%s', net_uri)
+                return net_uri
+
+        # Not a GVFS path (e.g. a regular local file) — nothing useful for
+        # network navigation; return a file:// URI so the caller can still log it.
+        from gi.repository import Gio as _Gio
+        return _Gio.File.new_for_path(real_path).get_uri()
+
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
 
@@ -109,6 +198,14 @@ class FileHandler(object):
             if not path.startswith('file://'):
                 self._source_uri = path
                 log.debug('_resolve_uri: set _source_uri=%s', path)
+            elif '/run/user/' in local and '/doc/' in local:
+                # Document-portal path: the portal file chooser hides the real
+                # smb:// URI behind file:///run/user/*/doc/<id>/.  Query the
+                # Documents portal via DBus to recover the real network URI.
+                net_uri = self._doc_portal_real_uri(local)
+                if net_uri:
+                    self._source_uri = net_uri
+                    log.debug('_resolve_uri: doc portal -> _source_uri=%s', net_uri)
             return local
         # No POSIX path — download to a managed temp directory.
         if self._net_tmp_dir is None:
