@@ -102,7 +102,13 @@ class FileHandler(object):
         gfile = Gio.File.new_for_uri(path)
         local = gfile.get_path()
         if local:
-            log.debug('_resolve_uri: GVFS local path=%s  (_source_uri stays None)', local)
+            log.debug('_resolve_uri: resolved to local path=%s', local)
+            # Always store the original network URI so next/prev archive
+            # navigation can enumerate the remote directory via GIO, even
+            # when GIO/GVFS can provide a local POSIX path for reading.
+            if not path.startswith('file://'):
+                self._source_uri = path
+                log.debug('_resolve_uri: set _source_uri=%s', path)
             return local
         # No POSIX path — download to a managed temp directory.
         if self._net_tmp_dir is None:

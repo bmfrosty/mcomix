@@ -156,24 +156,51 @@ class _MainFileChooserDialog:
             except Exception:
                 pass
 
+            # Fetch the folder URI unconditionally — we need it both for the
+            # "last browsed" pref and to reconstruct network URIs below.
+            folder_uri = self._native.get_current_folder_uri() or ''
+            folder_gfile = Gio.File.new_for_uri(folder_uri)
+            log.debug('file chooser response: folder_uri=%s', folder_uri)
+
             # Store the raw URI when the folder has no POSIX path so that
             # _restore_folder() can navigate back to a network location next time.
             if prefs['store recent file info']:
-                folder_uri = self._native.get_current_folder_uri() or ''
-                folder_gfile = Gio.File.new_for_uri(folder_uri)
                 local_folder = folder_gfile.get_path()
                 prefs['path of last browsed in filechooser'] = \
                     local_folder if local_folder else folder_uri
             else:
                 prefs['path of last browsed in filechooser'] = constants.HOME_DIR
 
-            # Prefer local POSIX path when GIO can resolve one; otherwise pass the
-            # raw URI so file_handler._resolve_uri() can copy it to a temp location.
+            # Build the list of paths/URIs to open.
+            #
+            # The portal file chooser hands us back document-portal URIs
+            # (file:///run/user/*/doc/<id>/filename) rather than the original
+            # network URIs.  The document portal exposes only the single chosen
+            # file, so the local file provider cannot list siblings for
+            # next/previous archive navigation.
+            #
+            # When the folder URI is a genuine network URI (smb://, ftp://, …)
+            # we reconstruct the original network URI for each chosen file so
+            # that file_handler._resolve_uri() receives the real smb:// URI and
+            # can set _source_uri, enabling GIO-based sibling enumeration.
+            #
+            # For ordinary local files we keep the local POSIX path as before.
+            is_network_folder = folder_uri and '://' in folder_uri and \
+                not folder_uri.startswith('file://')
+            log.debug('file chooser response: is_network_folder=%s', is_network_folder)
+
             paths = []
             for uri in uris:
                 gfile = Gio.File.new_for_uri(uri)
                 local = gfile.get_path()
-                paths.append(local if local else uri)
+                log.debug('file chooser response: uri=%s local=%s', uri, local)
+                if local and is_network_folder:
+                    # Reconstruct the network URI from the folder URI + basename.
+                    net_uri = folder_gfile.get_child(gfile.get_basename()).get_uri()
+                    log.debug('file chooser response: using network URI=%s', net_uri)
+                    paths.append(net_uri)
+                else:
+                    paths.append(local if local else uri)
 
             first_gfile = Gio.File.new_for_uri(uris[0])
             _MainFileChooserDialog._last_activated_file = \
