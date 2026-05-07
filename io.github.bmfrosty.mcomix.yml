@@ -74,17 +74,18 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: a3125e8093a7be8e3595e5b5fec7f6fed25c4d10
+        commit: 822eef5453fa0293e3c4005e1eeb241ddacfeec3
 
       - type: shell
         commands:
           # Patch the app name to match the Flatpak app ID so that
           # set_prgname() / set_program_class() use the right identifier.
           - sed -i "s:constants.APPNAME:'${FLATPAK_ID}':g" ./mcomix/run.py
-          # Append the git short SHA to the version so the About dialog
-          # identifies exactly which build is running.
-          - commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown);
-            sed -i "s/VERSION = '\([^']*\)'/VERSION = '\1+${commit}'/" mcomix/constants.py
+          # Append pr<N>.<sha> to VERSION so the About dialog shows e.g.
+          # "3.2.0-dev0+pr10.822eef5", making the installed build unambiguous.
+          - pr=$(grep -oP 'FORK_PR\s*=\s*\K[0-9]+' mcomix/constants.py || echo 0);
+            commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown);
+            sed -i "s/VERSION = '\([^']*\)'/VERSION = '\1+pr${pr}.${commit}'/" mcomix/constants.py
 
       - type: script
         dest-filename: resize.py
