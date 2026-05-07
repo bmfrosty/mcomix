@@ -16,6 +16,22 @@ as a Flatpak on other distributions, nor as a native package.
 Maintaining a fork is not a goal. The hope is that the upstream MComix authors
 will adopt these patches so this fork can be retired.
 
+## Installation (Flatpak)
+
+```bash
+# Add the repository (one time)
+flatpak remote-add --user bmfrosty-mcomix \
+  https://bmfrosty.github.io/mcomix/ --no-gpg-verify
+
+# Install
+flatpak install bmfrosty-mcomix io.github.bmfrosty.mcomix
+
+# Update when a new version is available
+flatpak update io.github.bmfrosty.mcomix
+```
+
+The `--no-gpg-verify` flag is required because the repository is not GPG-signed.
+
 ## Additional features in this fork
 
 - **Dark mode fix** — detects the system dark/light theme via the XDG Settings

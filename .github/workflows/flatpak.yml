@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,3 +19,36 @@ jobs:
           bundle: io.github.bmfrosty.mcomix.flatpak
           manifest-path: io.github.bmfrosty.mcomix.yml
           cache-key: flatpak-builder-${{ github.sha }}
+      - name: Update repo summary for remote access
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: flatpak build-update-repo repo
+      - name: Upload repo artifact for deployment
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-repo
+          path: repo/
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Download repo artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flatpak-repo
+          path: repo
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
