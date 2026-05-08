@@ -62,6 +62,12 @@ modules:
 
   - name: mcomix
     buildsystem: simple
+    build-options:
+      env:
+        # Overrides the FORK_PR read from the pinned source so the version
+        # string reflects the PR that last changed the manifest, not the one
+        # that last changed the app source.  Update this with each PR.
+        MCOMIX_FORK_PR: "14"
     build-commands:
       - pip3 install --verbose --exists-action=i --no-index --prefix=${FLATPAK_DEST}
         --no-build-isolation .[fileformats]
@@ -79,7 +85,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: af4a78293382c3b787c78ba95eeb14153c415edb
+        commit: f82f18310e26d45917b68198ab41851885218b1f
 
       - type: shell
         commands:
@@ -87,8 +93,11 @@ modules:
           # set_prgname() / set_program_class() use the right identifier.
           - sed -i "s:constants.APPNAME:'${FLATPAK_ID}':g" ./mcomix/run.py
           # Append pr<N>.<sha> to VERSION so the About dialog shows e.g.
-          # "3.2.0-dev0+pr10.822eef5", making the installed build unambiguous.
-          - pr=$(sed -n 's/^FORK_PR = \([0-9]*\).*/\1/p' mcomix/constants.py || echo 0);
+          # "3.2.0-dev0+pr14.af4a782", making the installed build unambiguous.
+          # MCOMIX_FORK_PR (from build-options.env above) overrides the value
+          # in constants.py so the PR number tracks the manifest, not the
+          # pinned source commit (which always lags one PR behind).
+          - pr=${MCOMIX_FORK_PR:-$(sed -n 's/^FORK_PR = \([0-9]*\).*/\1/p' mcomix/constants.py || echo 0)};
             commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown);
             sed -i "s/VERSION = '\([^']*\)'/VERSION = '\1+pr${pr}.${commit}'/" mcomix/constants.py
 

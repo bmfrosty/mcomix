@@ -28,6 +28,13 @@ jobs:
             echo "::error::FORK_PR in mcomix/constants.py is $fork_pr but this PR is #${{ github.event.pull_request.number }}. Set FORK_PR = ${{ github.event.pull_request.number }} in mcomix/constants.py."
             exit 1
           fi
+      - name: Verify MCOMIX_FORK_PR in manifest matches this PR number
+        run: |
+          manifest_pr=$(grep 'MCOMIX_FORK_PR:' io.github.bmfrosty.mcomix.yml | sed 's/.*MCOMIX_FORK_PR: *"\?\([0-9]*\)"\?.*/\1/')
+          if [ "$manifest_pr" != "${{ github.event.pull_request.number }}" ]; then
+            echo "::error::MCOMIX_FORK_PR in io.github.bmfrosty.mcomix.yml is $manifest_pr but this PR is #${{ github.event.pull_request.number }}. Set MCOMIX_FORK_PR: \"${{ github.event.pull_request.number }}\" in the manifest."
+            exit 1
+          fi
 
   build:
     runs-on: ubuntu-latest
@@ -40,6 +47,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Lint manifest
         run: flatpak-builder-lint manifest io.github.bmfrosty.mcomix.yml
+      - name: Show expected install version
+        run: |
+          pinned=$(grep -A3 'url: https://github.com/bmfrosty/mcomix.git' \
+            io.github.bmfrosty.mcomix.yml | grep 'commit:' | awk '{print $2}')
+          manifest_pr=$(grep 'MCOMIX_FORK_PR:' io.github.bmfrosty.mcomix.yml | \
+            sed 's/.*MCOMIX_FORK_PR: *"\?\([0-9]*\)"\?.*/\1/')
+          base_ver=$(git show ${pinned}:mcomix/constants.py 2>/dev/null | \
+            sed -n "s/^VERSION = '\([^']*\)'/\1/p")
+          echo "Installed version will be: ${base_ver}+pr${manifest_pr}.${pinned:0:7}"
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: io.github.bmfrosty.mcomix.flatpak
