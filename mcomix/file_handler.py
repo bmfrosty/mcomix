@@ -169,6 +169,20 @@ class FileHandler(object):
                   len(basename_to_uri), len(doc_ids))
         return basename_to_uri
 
+    @staticmethod
+    def _normalize_kio_fuse_path(path):
+        """Lowercase host and share name in a KIO FUSE path for consistent keys.
+
+        KIO FUSE path structure: /run/user/<uid>/kio-fuse-<id>/<scheme>/<host>/<share>/...
+        SMB share names are case-insensitive, but different code paths (direct
+        file-chooser vs _try_kio_fuse_path) may produce different capitalizations.
+        Normalizing here makes last_read_page lookups consistent.
+        """
+        m = re.match(r'^(/run/user/\d+/kio-fuse-[^/]+/[^/]+/)([^/]+)/([^/]+)/(.+)$', path)
+        if m:
+            return m.group(1) + m.group(2).lower() + '/' + m.group(3).lower() + '/' + m.group(4)
+        return path
+
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
 
@@ -182,8 +196,10 @@ class FileHandler(object):
         if isinstance(path, list):
             return [self._resolve_uri(p) for p in path]
         if '://' not in path:
-            # Plain POSIX path (including doc-portal FUSE paths).
-            return path
+            # KIO FUSE paths are treated as plain local paths — the local file
+            # provider enumerates siblings via the FUSE mount.  _archive_opened
+            # extracts the smb:// URI for recents without setting _source_uri.
+            return self._normalize_kio_fuse_path(path)
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
         gfile = Gio.File.new_for_uri(path)
@@ -201,8 +217,16 @@ class FileHandler(object):
                 # subsequent prev/next presses continue to enumerate the same dir.
                 self._source_uri = path
                 log.debug('_resolve_uri: GVFS file:// URI -> _source_uri=%s', path)
-            return local
-        # No POSIX path — download to a managed temp directory.
+            return self._normalize_kio_fuse_path(local)
+        # No GVFS FUSE path — try KIO FUSE (KDE) before falling back to copy.
+        kio_path = self._try_kio_fuse_path(path)
+        if kio_path:
+            # Treat as local — don't set _source_uri so the file provider
+            # handles sibling navigation via the FUSE mount.
+            kio_path = self._normalize_kio_fuse_path(kio_path)
+            log.debug('_resolve_uri: KIO FUSE mountUrl -> %s', kio_path)
+            return kio_path
+        # Last resort: download to a managed temp directory via GIO.
         if self._net_tmp_dir is None:
             self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
         basename = gfile.get_basename() or 'mcomix_net_file'
@@ -217,6 +241,32 @@ class FileHandler(object):
         self._source_uri = path
         log.debug('_resolve_uri: no local path, copied to tmp=%s, _source_uri=%s', tmp_path, path)
         return tmp_path
+
+    def _try_kio_fuse_path(self, uri):
+        """Ask the KIO FUSE daemon to mount uri and return its local FUSE path.
+
+        Returns the POSIX path string on success, or None if KIO FUSE is
+        unavailable or does not support the URI scheme.
+        """
+        try:
+            from gi.repository import Gio, GLib
+            conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            result = conn.call_sync(
+                'org.kde.KIOFuse',
+                '/org/kde/KIOFuse',
+                'org.kde.KIOFuse.VFS',
+                'mountUrl',
+                GLib.Variant('(s)', (uri,)),
+                GLib.VariantType('(s)'),
+                Gio.DBusCallFlags.NONE,
+                30000,
+                None,
+            )
+            local_path = result.get_child_value(0).get_string()
+            return local_path if local_path else None
+        except Exception as ex:
+            log.debug('_try_kio_fuse_path: %s', ex)
+            return None
 
     def refresh_file(self, *args, **kwargs):
         """ Closes the current file(s)/archive and reloads them. """
@@ -353,7 +403,21 @@ class FileHandler(object):
 
             self.write_fileinfo_file()
 
-        self._window.uimanager.recent.add(self._current_file)
+        kio_m = re.match(r'^/run/user/\d+/kio-fuse-[^/]+/([^/]+)/(.+)$',
+                         self._current_file)
+        if kio_m:
+            from urllib.parse import unquote, quote as _quote
+            scheme = kio_m.group(1)
+            parts = _quote(unquote(kio_m.group(2)), safe='/').split('/', 2)
+            parts[0] = parts[0].lower()          # normalize host (case-insensitive)
+            if len(parts) > 1:
+                parts[1] = parts[1].lower()      # normalize share name (case-insensitive)
+            recent_target = scheme + '://' + '/'.join(parts)
+        elif self._source_uri and not self._source_uri.startswith('file://'):
+            recent_target = self._source_uri
+        else:
+            recent_target = self._current_file
+        self._window.uimanager.recent.add(recent_target)
 
     @callback.Callback
     def file_opened(self):
