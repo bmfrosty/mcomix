@@ -85,7 +85,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: f82f183b99ff18b73b677a7fc46d84e93f21099d
+        commit: f82f18310e26d45917b68198ab41851885218b1f
 
       - type: shell
         commands:
