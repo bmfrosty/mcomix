@@ -27,8 +27,9 @@ class _MainFileChooserDialog:
 
     _last_activated_file = None
 
-    def __init__(self, window):
+    def __init__(self, window, start_folder=None):
         self._window = window
+        self._start_folder = start_folder
         self._native = Gtk.FileChooserNative.new(
             _('Open'),
             window,
@@ -106,6 +107,20 @@ class _MainFileChooserDialog:
     # ------------------------------------------------------------------
 
     def _restore_folder(self):
+        if self._start_folder:
+            try:
+                if '://' in self._start_folder and not self._start_folder.startswith('file://'):
+                    self._native.set_current_folder_uri(self._start_folder)
+                else:
+                    gfile = Gio.File.new_for_uri(self._start_folder)
+                    local = gfile.get_path()
+                    if local:
+                        self._native.set_current_folder(local)
+                    else:
+                        self._native.set_current_folder_uri(self._start_folder)
+            except Exception as ex:
+                log.debug('_restore_folder start_folder: %s', ex)
+            return
         try:
             from mcomix import main
             current_file = main.main_window().filehandler.get_path_to_base()
@@ -244,6 +259,15 @@ def open_main_filechooser_dialog(action, window):
         _main_filechooser_dialog = _MainFileChooserDialog(window)
     else:
         _main_filechooser_dialog.present()
+
+
+def open_main_filechooser_dialog_at(folder_uri, window):
+    """Open the main filechooser dialog pre-navigated to folder_uri."""
+    global _main_filechooser_dialog
+    if _main_filechooser_dialog is not None:
+        _main_filechooser_dialog.destroy()
+        _main_filechooser_dialog = None
+    _main_filechooser_dialog = _MainFileChooserDialog(window, start_folder=folder_uri)
 
 
 def _close_main_filechooser_dialog(*args):

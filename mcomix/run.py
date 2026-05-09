@@ -170,7 +170,9 @@ def run():
 
     # Tell GTK3 to use the xdg-desktop-portal file chooser so that
     # Gtk.FileChooserNative gets the full-featured portal dialog (which
-    # supports network/SMB locations) even outside a Flatpak sandbox.
+    # supports network/SMB locations).  Outside a Flatpak sandbox the portal
+    # returns real smb:// URIs rather than doc-portal wrappers, so this is
+    # the right behaviour in both cases.
     # Must be set before setup_dependencies() imports GTK and before any
     # FileChooserNative is instantiated, because GDK caches the result.
     if 'GTK_USE_PORTAL' not in os.environ:

@@ -16,6 +16,13 @@ as a Flatpak on other distributions, nor as a native package.
 Maintaining a fork is not a goal. The hope is that the upstream MComix authors
 will adopt these patches so this fork can be retired.
 
+## Current Status - untested as a flatpak
+
+Latest set of fixes is for fixes to the the file picker around selecting files
+in SMB, caching them in the Recent menu, and getting Previous and Next Archive
+buttons work in local mode, and getting those commited, I'm not going to try
+and fix it until I'm full up on Claude credits again.
+
 ## Installation (Flatpak)
 
 ```bash

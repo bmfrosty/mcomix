@@ -67,7 +67,7 @@ modules:
         # Overrides the FORK_PR read from the pinned source so the version
         # string reflects the PR that last changed the manifest, not the one
         # that last changed the app source.  Update this with each PR.
-        MCOMIX_FORK_PR: "14"
+        MCOMIX_FORK_PR: "15"
     build-commands:
       - pip3 install --verbose --exists-action=i --no-index --prefix=${FLATPAK_DEST}
         --no-build-isolation .[fileformats]
@@ -85,7 +85,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: f82f18310e26d45917b68198ab41851885218b1f
+        commit: 016fccfa96bd434a59cf661f462251bd5eafca24
 
       - type: shell
         commands:

@@ -89,6 +89,7 @@ class MainUI(Gtk.UIManager):
                 None, None, window.extract_page),
             ('menu_zoom', 'mcomix-zoom', _('_Zoom')),
             ('menu_recent', Gtk.STOCK_FILE, _('_Recent')),
+            ('menu_recent_paths', Gtk.STOCK_DIRECTORY, _('Recent _Paths')),
             ('menu_bookmarks_popup', 'comix-add-bookmark', _('_Bookmarks')),
             ('menu_bookmarks', None, _('_Bookmarks')),
             ('menu_toolbars', None, _('T_oolbars')),
@@ -237,6 +238,7 @@ class MainUI(Gtk.UIManager):
                 <menu action="menu_file">
                     <menuitem action="open" />
                     <menu action="menu_recent" />
+                    <menu action="menu_recent_paths" />
                     <menuitem action="library" />
                     <separator />
                     <menuitem action="extract_page" />
@@ -394,6 +396,7 @@ class MainUI(Gtk.UIManager):
                 <separator />
                 <menuitem action="open" />
                 <menu action="menu_recent" />
+                <menu action="menu_recent_paths" />
                 <menuitem action="library" />
                 <separator />
                 <menu action="menu_open_with_popup"></menu>
@@ -424,6 +427,14 @@ class MainUI(Gtk.UIManager):
         self.recentPopup = recent.RecentFilesMenu(self, window)
         self.get_widget('/Popup/menu_recent').set_submenu(self.recentPopup)
         self.get_widget('/Popup/menu_recent').show()
+
+        self.recentPaths = recent.RecentPathsMenu(window)
+        self.get_widget('/Menu/menu_file/menu_recent_paths').set_submenu(self.recentPaths)
+        self.get_widget('/Menu/menu_file/menu_recent_paths').show()
+
+        self.recentPathsPopup = recent.RecentPathsMenu(window)
+        self.get_widget('/Popup/menu_recent_paths').set_submenu(self.recentPathsPopup)
+        self.get_widget('/Popup/menu_recent_paths').show()
 
         openwith = openwith_menu.OpenWithMenu(self, window)
         self.get_widget('/Menu/menu_file/menu_open_with').set_submenu(openwith)
