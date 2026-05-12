@@ -201,6 +201,10 @@ def _list_servers() -> list:
                             Gio.DBusCallFlags.NONE, 3000, None,
                         )
                         hostname = r.get_child_value(5).get_string().rstrip('.')
+                        # Strip .local — mDNS names don't resolve inside the
+                        # Flatpak network namespace; the bare hostname does.
+                        if hostname.lower().endswith('.local'):
+                            hostname = hostname[:-6]
                         if hostname:
                             servers.add(hostname.lower())
                     except Exception as ex:
