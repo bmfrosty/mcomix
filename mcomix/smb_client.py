@@ -156,46 +156,90 @@ def list_directory(smb_uri: str) -> list:
 
 
 def _list_servers() -> list:
-    """Discover SMB servers on the local network via mDNS (avahi-browse) and nmblookup."""
-    import subprocess
+    """Discover SMB servers on the local network.
+
+    Tries two methods in order:
+    1. Avahi D-Bus (org.freedesktop.Avahi) — works inside Flatpak sandbox.
+    2. avahi-browse subprocess — works when running from source on the host.
+    """
     servers: set[str] = set()
 
-    # mDNS: avahi-browse -r -t _smb._tcp  (available on most Linux desktops)
+    # Method 1: Avahi D-Bus (Flatpak-compatible; requires --system-talk-name=org.freedesktop.Avahi)
     try:
-        out = subprocess.check_output(
-            ['avahi-browse', '-r', '-t', '_smb._tcp'],
-            stderr=subprocess.DEVNULL, timeout=5, text=True,
-        )
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith('hostname = ['):
-                h = line[12:].rstrip(']').rstrip('.').lower()
-                if h:
-                    servers.add(h)
-        log.debug('smb_client: avahi found: %s', servers)
-    except Exception as ex:
-        log.debug('smb_client: avahi-browse: %s', ex)
+        from gi.repository import Gio, GLib
 
-    # NetBIOS broadcast fallback (requires samba-client / nmblookup)
+        # Use a private GLib context so we don't interfere with the GTK main loop.
+        ctx = GLib.MainContext.new()
+        ctx.push_thread_default()
+        try:
+            loop = GLib.MainLoop.new(ctx, False)
+            conn = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            avahi = Gio.DBusProxy.new_sync(
+                conn, Gio.DBusProxyFlags.NONE, None,
+                'org.freedesktop.Avahi', '/',
+                'org.freedesktop.Avahi.Server', None,
+            )
+            result = avahi.call_sync(
+                'ServiceBrowserNew',
+                GLib.Variant('(iissu)', (-1, -1, '_smb._tcp', 'local', 0)),
+                Gio.DBusCallFlags.NONE, 3000, None,
+            )
+            browser_path = result.get_child_value(0).get_string()
+            browser = Gio.DBusProxy.new_sync(
+                conn, Gio.DBusProxyFlags.NONE, None,
+                'org.freedesktop.Avahi', browser_path,
+                'org.freedesktop.Avahi.ServiceBrowser', None,
+            )
+
+            def _on_signal(_proxy, _sender, signal_name, params):
+                if signal_name == 'ItemNew':
+                    iface, proto, name, stype, domain, _flags = params.unpack()
+                    try:
+                        r = avahi.call_sync(
+                            'ResolveService',
+                            GLib.Variant('(iisssiu)', (iface, proto, name, stype, domain, -1, 0)),
+                            Gio.DBusCallFlags.NONE, 3000, None,
+                        )
+                        hostname = r.get_child_value(5).get_string().rstrip('.')
+                        if hostname:
+                            servers.add(hostname.lower())
+                    except Exception as ex:
+                        log.debug('smb_client: avahi resolve: %s', ex)
+                elif signal_name in ('AllForNow', 'Failure'):
+                    loop.quit()
+
+            browser.connect('g-signal', _on_signal)
+            GLib.timeout_add(4000, loop.quit)
+            loop.run()
+        finally:
+            ctx.pop_thread_default()
+
+        log.debug('smb_client: avahi D-Bus found: %s', servers)
+    except Exception as ex:
+        log.debug('smb_client: avahi D-Bus: %s', ex)
+
+    # Method 2: avahi-browse subprocess (from-source / non-Flatpak)
     if not servers:
+        import subprocess
         try:
             out = subprocess.check_output(
-                ['nmblookup', '-M', '--', '-'],
-                stderr=subprocess.DEVNULL, timeout=3, text=True,
+                ['avahi-browse', '-r', '-t', '_smb._tcp'],
+                stderr=subprocess.DEVNULL, timeout=5, text=True,
             )
             for line in out.splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and not line.startswith('querying'):
-                    servers.add(parts[1].lower())
-            log.debug('smb_client: nmblookup found: %s', servers)
+                line = line.strip()
+                if line.startswith('hostname = ['):
+                    h = line[12:].rstrip(']').rstrip('.').lower()
+                    if h:
+                        servers.add(h)
+            log.debug('smb_client: avahi-browse found: %s', servers)
         except Exception as ex:
-            log.debug('smb_client: nmblookup: %s', ex)
+            log.debug('smb_client: avahi-browse: %s', ex)
 
     if not servers:
         raise RuntimeError(
             'No SMB servers found via mDNS.\n'
-            'Install avahi and ensure _smb._tcp services are advertised, '
-            'or type a server address directly, e.g.  smb://myserver'
+            'Type a server address directly, e.g.  smb://myserver'
         )
 
     return sorted([DirEntry(s, True, 0) for s in servers], key=lambda e: e.name.lower())
