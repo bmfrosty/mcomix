@@ -725,14 +725,57 @@ class FileHandler(object):
         happens when the user navigates more than 10 steps from the last
         enumeration point.  Sets self._net_sibling_cache to None on any error.
         """
-        from gi.repository import Gio
-
         log.debug('_build_net_sibling_cache: _source_uri=%s', self._source_uri)
 
         archive_exts = set()
         for mime_types, extensions in archive_tools.get_supported_formats().values():
             archive_exts.update(ext.lower() for ext in extensions)
 
+        # For smb:// URIs use smbprotocol directly — GIO cannot enumerate SMB
+        # shares inside the Flatpak sandbox (no GVFS FUSE mount available).
+        if self._source_uri and self._source_uri.startswith('smb://'):
+            from mcomix import smb_client as _sc
+            from urllib.parse import urlparse, unquote
+            if _sc.is_available():
+                parent_smb_uri = _sc.parent_uri(self._source_uri)
+                if not parent_smb_uri or parent_smb_uri == 'smb://':
+                    log.debug('_build_net_sibling_cache: no smb parent for %s', self._source_uri)
+                    self._net_sibling_cache = None
+                    return
+                try:
+                    entries = _sc.list_directory(parent_smb_uri)
+                except Exception as ex:
+                    log.error('Could not list SMB directory for archive navigation: %s', ex)
+                    self._net_sibling_cache = None
+                    return
+                names = [e.name for e in entries
+                         if not e.is_dir
+                         and os.path.splitext(e.name)[1].lstrip('.').lower() in archive_exts]
+                tools.alphanumeric_sort(names)
+                log.debug('_build_net_sibling_cache: SMB found %d archive siblings', len(names))
+                current_name = unquote(urlparse(self._source_uri).path.rstrip('/').split('/')[-1])
+                log.debug('_build_net_sibling_cache: current_name=%s', current_name)
+                try:
+                    idx = names.index(current_name)
+                except ValueError:
+                    log.debug('_build_net_sibling_cache: %s not in sibling list (first 5: %s)',
+                              current_name, names[:5])
+                    self._net_sibling_cache = None
+                    return
+                prev_names = list(reversed(names[max(0, idx - 10):idx]))
+                next_names = names[idx + 1:idx + 11]
+                log.debug('_build_net_sibling_cache: idx=%d, prev=%s, next=%s',
+                          idx, prev_names, next_names)
+                self._net_sibling_cache = {
+                    'parent_uri': parent_smb_uri,
+                    'current_uri': self._source_uri,
+                    'prev': [_sc.child_uri(parent_smb_uri, n) for n in prev_names],
+                    'next': [_sc.child_uri(parent_smb_uri, n) for n in next_names],
+                }
+                return
+
+        # GIO path for GVFS FUSE mounts and other network URIs.
+        from gi.repository import Gio
         gfile = Gio.File.new_for_uri(self._source_uri)
         parent = gfile.get_parent()
         if parent is None:
