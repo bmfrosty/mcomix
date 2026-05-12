@@ -1,5 +1,6 @@
 CLAUDE.md
 PLAN.md
+PLAN_TWO_FILE_PATHS.md
 *.pyc
 __pycache__
 win32/*.nupkg
