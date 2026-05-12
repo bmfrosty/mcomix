@@ -243,4 +243,9 @@ def run():
     except KeyboardInterrupt: # Will not always work because of threading.
         window.terminate_program()
 
+    # terminate_program() has already saved all prefs before calling
+    # Gtk.main_quit().  Exit directly so non-daemon threads (smbprotocol
+    # transport, multiprocessing manager) do not block the process.
+    os._exit(0)
+
 # vim: expandtab:sw=4:ts=4

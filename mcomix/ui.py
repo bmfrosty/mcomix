@@ -17,6 +17,14 @@ from mcomix.preferences import prefs
 from mcomix.library import main_dialog as library_main_dialog
 from mcomix.i18n import _
 
+def _open_from_network(action, window):
+    """Open the SMB file browser and load the selected file."""
+    from mcomix import smb_browser_dialog
+    uri = smb_browser_dialog.open_smb_dialog(window)
+    if uri:
+        window.filehandler.open_file(uri)
+
+
 class MainUI(Gtk.UIManager):
 
     def __init__(self, window):
@@ -197,6 +205,8 @@ class MainUI(Gtk.UIManager):
                 edit_dialog.open_dialog),
             ('open', Gtk.STOCK_OPEN, _('_Open...'),
                 None, None, file_chooser_main_dialog.open_main_filechooser_dialog),
+            ('open_from_network', Gtk.STOCK_NETWORK, _('Open from _Network...'),
+                '<Ctrl><Shift>o', None, _open_from_network),
             ('enhance_image', 'mcomix-enhance-image', _('En_hance image...'),
                 None, None, enhance_dialog.open_dialog)], window)
 
@@ -237,6 +247,7 @@ class MainUI(Gtk.UIManager):
             <menubar name="Menu">
                 <menu action="menu_file">
                     <menuitem action="open" />
+                    <menuitem action="open_from_network" />
                     <menu action="menu_recent" />
                     <menu action="menu_recent_paths" />
                     <menuitem action="library" />
@@ -395,6 +406,7 @@ class MainUI(Gtk.UIManager):
                 </menu>
                 <separator />
                 <menuitem action="open" />
+                <menuitem action="open_from_network" />
                 <menu action="menu_recent" />
                 <menu action="menu_recent_paths" />
                 <menuitem action="library" />
