@@ -226,6 +226,27 @@ class FileHandler(object):
             kio_path = self._normalize_kio_fuse_path(kio_path)
             log.debug('_resolve_uri: KIO FUSE mountUrl -> %s', kio_path)
             return kio_path
+        # For smb:// URIs, use smbprotocol directly when KIO FUSE is unavailable
+        # (e.g. inside the Flatpak sandbox where KIO FUSE D-Bus is not accessible).
+        if path.startswith('smb://'):
+            from mcomix import smb_client as _sc
+            if _sc.is_available():
+                if self._net_tmp_dir is None:
+                    self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
+                basename = gfile.get_basename() or 'mcomix_net_file'
+                tmp_path = os.path.join(self._net_tmp_dir, basename)
+                try:
+                    import shutil
+                    with _sc.open_file(path) as src:
+                        with open(tmp_path, 'wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                    self._source_uri = path
+                    log.debug('_resolve_uri: SMB direct copy to tmp=%s, _source_uri=%s',
+                              tmp_path, path)
+                    return tmp_path
+                except Exception as ex:
+                    log.debug('_resolve_uri: SMB direct copy failed: %s', ex)
+                    raise IOError(_('Could not open SMB file "%s": %s') % (path, str(ex)))
         # Last resort: download to a managed temp directory via GIO.
         if self._net_tmp_dir is None:
             self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
