@@ -10,10 +10,13 @@ rename-appdata-file: mcomix.metainfo.xml
 command: mcomix
 finish-args:
   - --share=ipc
+  - --share=network
   - --socket=fallback-x11
   - --socket=wayland
   - --socket=pulseaudio
   - --device=dri
+  # Avahi D-Bus for SMB server discovery via mDNS (_smb._tcp)
+  - --system-talk-name=org.freedesktop.Avahi
   - --env=TMPDIR=/var/tmp
   # Local filesystem access for the built-in file chooser fallback
   - --filesystem=xdg-documents
@@ -67,7 +70,7 @@ modules:
         # Overrides the FORK_PR read from the pinned source so the version
         # string reflects the PR that last changed the manifest, not the one
         # that last changed the app source.  Update this with each PR.
-        MCOMIX_FORK_PR: "15"
+        MCOMIX_FORK_PR: "16"
     build-commands:
       - pip3 install --verbose --exists-action=i --no-index --prefix=${FLATPAK_DEST}
         --no-build-isolation .[fileformats]
@@ -85,7 +88,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/bmfrosty/mcomix.git
-        commit: 016fccfa96bd434a59cf661f462251bd5eafca24
+        commit: 0e5b598e81c46c74ca89be11e5e3d01eebab2c41
 
       - type: shell
         commands:
@@ -176,3 +179,53 @@ modules:
           - type: file
             url: https://files.pythonhosted.org/packages/8c/6c/0a40afdb50a0fe041ab95553b835a8160b6cf0e81edf2ae2fe9f5224cbf9/chardet-7.4.3-py3-none-any.whl
             sha256: 1173b74051570cf08099d7429d92e4882d375ad4217f92a6e5240ccfb26f231e
+
+      - name: python3-pycparser
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "pycparser" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl
+            sha256: b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+
+      - name: python3-cffi
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "cffi" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/98/df/0a1755e750013a2081e863e7cd37e0cdd02664372c754e5560099eb7aa44/cffi-2.0.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+            sha256: c8d3b5532fc71b7a77c09192b4a5a200ea992702734a2e9279a37f2478236f26
+
+      - name: python3-cryptography
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "cryptography" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/95/38/0d29a6fd7d0d1373f0c0c88a04ba20e359b257753ac497564cd660fc1d55/cryptography-48.0.0-cp311-abi3-manylinux_2_28_x86_64.whl
+            sha256: a0e692c683f4df67815a2d258b324e66f4738bd7a96a218c826dce4f4bd05d8f
+
+      - name: python3-pyspnego
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "pyspnego" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/dd/9f/4da6a1b9611af2397289b77d6fd08f5fe8f1f34dabc3bf85b0638d655e64/pyspnego-0.12.1-py3-none-any.whl
+            sha256: 7237cb47985ccf5da512106ddb2731e4f9cefec00991f76c054488eb95fb1a2d
+
+      - name: python3-smbprotocol
+        buildsystem: simple
+        build-commands:
+          - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+            --prefix=${FLATPAK_DEST} "smbprotocol" --no-build-isolation
+        sources:
+          - type: file
+            url: https://files.pythonhosted.org/packages/79/43/8acc58e24f78af82300a8ebdd457face4c6e4b27f7b52885a239724d3e21/smbprotocol-1.16.1-py3-none-any.whl
+            sha256: 0f9c35b2a0103314da06aecaffa8821f060a9773ad82cc0d7f29130083d598b4
