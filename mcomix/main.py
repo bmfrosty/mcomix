@@ -1184,11 +1184,18 @@ class MainWindow(Gtk.Window):
             main_dialog._dialog.close()
         backend.LibraryBackend().close()
 
+        # Close SMB connections so their transport threads exit before we join.
+        try:
+            from mcomix import smb_client
+            smb_client.clear_credentials()
+        except Exception:
+            pass
+
         # This hack is to avoid Python issue #1856.
         for thread in threading.enumerate():
             if thread is not threading.currentThread() and not isinstance(thread, threading._DummyThread):
                 log.debug('Waiting for thread %s to finish before exit', thread)
-                thread.join()
+                thread.join(timeout=2.0)
 
 #: Main window instance
 __main_window = None

@@ -63,6 +63,20 @@ class FileHandler(object):
         self._condition = None
         #: Provides a list of available files/archives in the open directory.
         self._file_provider = None
+        #: Temp dir for files downloaded from non-local URIs.
+        self._net_tmp_dir = None
+        #: Original URI of the currently open file when it came from a non-local
+        #: location; None for ordinary local files.  Needed so next/prev archive
+        #: navigation can enumerate the remote parent directory instead of the
+        #: local temp dir (which only ever contains the one downloaded file).
+        self._source_uri = None
+        #: Sliding window cache for remote directory navigation.
+        #: Dict with keys: parent_uri, current_uri, prev (list, closest-first),
+        #: next (list, closest-first), complete (bool — True means the lists cover
+        #: the entire directory so no background refetch is needed).
+        self._net_sibling_cache = None
+        #: True while a background thread is fetching the full sibling list.
+        self._sibling_fetch_running = False
         #: Keeps track of the last read page in archives
         self.last_read_page = last_read_page.LastReadPage(backend.LibraryBackend())
         #: Regexp used for determining which archive files are comment files.
@@ -70,6 +84,62 @@ class FileHandler(object):
         self.update_comment_extensions()
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
+
+    def _resolve_uri(self, path):
+        """Resolve a path or list of paths that may be URIs to local paths.
+
+        For smb:// URIs, copies the file via smbprotocol to a per-open temp
+        dir and sets _source_uri so sibling navigation works.  Falls back to
+        GIO copy for other non-local URIs.
+
+        Returns the same structure (string or list) as was passed in.
+        """
+        if isinstance(path, list):
+            return [self._resolve_uri(p) for p in path]
+        if '://' not in path:
+            return path  # already a local path
+        from gi.repository import Gio
+        log.debug('_resolve_uri: input URI=%s', path)
+        gfile = Gio.File.new_for_uri(path)
+        local = gfile.get_path()
+        if local:
+            log.debug('_resolve_uri: resolved to local path=%s', local)
+            return local
+        # For smb:// URIs, use smbprotocol directly.
+        if path.startswith('smb://'):
+            from mcomix import smb_client as _sc
+            if _sc.is_available():
+                if self._net_tmp_dir is None:
+                    self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
+                basename = gfile.get_basename() or 'mcomix_net_file'
+                tmp_path = os.path.join(self._net_tmp_dir, basename)
+                try:
+                    import shutil
+                    with _sc.open_file(path) as src:
+                        with open(tmp_path, 'wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                    self._source_uri = path
+                    log.debug('_resolve_uri: SMB direct copy to tmp=%s, _source_uri=%s',
+                              tmp_path, path)
+                    return tmp_path
+                except Exception as ex:
+                    log.debug('_resolve_uri: SMB direct copy failed: %s', ex)
+                    raise IOError(_('Could not open SMB file "%s": %s') % (path, str(ex)))
+        # Last resort: download to a managed temp directory via GIO.
+        if self._net_tmp_dir is None:
+            self._net_tmp_dir = tempfile.mkdtemp(prefix='mcomix_net.')
+        basename = gfile.get_basename() or 'mcomix_net_file'
+        tmp_path = os.path.join(self._net_tmp_dir, basename)
+        dest = Gio.File.new_for_path(tmp_path)
+        try:
+            gfile.copy(dest, Gio.FileCopyFlags.OVERWRITE, None, None, None)
+        except Exception as ex:
+            raise IOError(_('Could not copy remote file "%s": %s') % (path, str(ex)))
+        # Remember the original URI so next/prev archive can enumerate the
+        # remote parent directory rather than the single-file temp dir.
+        self._source_uri = path
+        log.debug('_resolve_uri: no local path, copied to tmp=%s, _source_uri=%s', tmp_path, path)
+        return tmp_path
 
     def refresh_file(self, *args, **kwargs):
         """ Closes the current file(s)/archive and reloads them. """
@@ -81,7 +151,7 @@ class FileHandler(object):
                 start_page = 0
             self.open_file(current_file, start_page, keep_fileprovider=True)
 
-    def open_file(self, path, start_page=0, keep_fileprovider=False):
+    def open_file(self, path, start_page=0, keep_fileprovider=False, smb_context=None):
         """Open the file pointed to by <path>.
 
         If <start_page> is not set we set the current
@@ -93,6 +163,15 @@ class FileHandler(object):
         """
 
         self._close()
+
+        # Convert any URI strings (e.g. smb://) to local POSIX paths before the
+        # rest of the pipeline, which assumes os.path-compatible strings throughout.
+        try:
+            path = self._resolve_uri(path)
+        except IOError as ex:
+            self._window.statusbar.set_message(str(ex))
+            self._window.osd.show(str(ex))
+            return False
 
         try:
             path = self._initialize_fileprovider(path, keep_fileprovider)
@@ -132,6 +211,8 @@ class FileHandler(object):
                 self._open_image_files(self.filelist, self._current_file)
             self._archive_opened(image_files)
 
+        if smb_context and self._source_uri:
+            self._set_smb_sibling_cache(smb_context)
         return True
 
     def _archive_opened(self, image_files):
@@ -181,7 +262,11 @@ class FileHandler(object):
 
             self.write_fileinfo_file()
 
-        self._window.uimanager.recent.add(self._current_file)
+        if self._source_uri and not self._source_uri.startswith('file://'):
+            recent_target = self._source_uri
+        else:
+            recent_target = self._current_file
+        self._window.uimanager.recent.add(recent_target)
 
     @callback.Callback
     def file_opened(self):
@@ -195,6 +280,7 @@ class FileHandler(object):
 
     def close_file(self):
         """Close the currently opened file and its provider. """
+        self._net_sibling_cache = None
         self._close(close_provider=True)
 
     def _close(self, close_provider=False):
@@ -214,6 +300,7 @@ class FileHandler(object):
             self._stop_waiting = True
             self._comment_files = []
             self._name_table.clear()
+            self._source_uri = None
             self.file_closed()
         # Catch up on UI events, so we don't leave idle callbacks.
         while Gtk.events_pending():
@@ -222,6 +309,10 @@ class FileHandler(object):
         if self._tmp_dir is not None:
             self.thread_delete(self._tmp_dir)
             self._tmp_dir = None
+        # Clean up any file copied from a non-local URI (see _resolve_uri).
+        if self._net_tmp_dir is not None:
+            self.thread_delete(self._net_tmp_dir)
+            self._net_tmp_dir = None
 
     def _initialize_fileprovider(self, path, keep_fileprovider):
         """ Creates the L{file_provider.FileProvider} for C{path}.
@@ -453,12 +544,193 @@ class FileHandler(object):
 
         return self._window.imagehandler.get_pretty_current_filename()
 
+    def _build_net_sibling_cache(self):
+        """Enumerate the remote parent directory once and store a ±10 window
+        of archive URIs around self._source_uri in self._net_sibling_cache.
+
+        The window shifts cheaply on each prev/next press; re-enumeration only
+        happens when the user navigates more than 10 steps from the last
+        enumeration point.  Sets self._net_sibling_cache to None on any error.
+        """
+        log.debug('_build_net_sibling_cache: _source_uri=%s', self._source_uri)
+
+        archive_exts = set()
+        for mime_types, extensions in archive_tools.get_supported_formats().values():
+            archive_exts.update(ext.lower() for ext in extensions)
+
+        if self._source_uri and self._source_uri.startswith('smb://'):
+            from mcomix import smb_client as _sc
+            from urllib.parse import urlparse, unquote
+            if _sc.is_available():
+                parent_smb_uri = _sc.parent_uri(self._source_uri)
+                if not parent_smb_uri or parent_smb_uri == 'smb://':
+                    log.debug('_build_net_sibling_cache: no smb parent for %s', self._source_uri)
+                    self._net_sibling_cache = None
+                    return
+                try:
+                    entries = _sc.list_directory(parent_smb_uri)
+                except Exception as ex:
+                    log.error('Could not list SMB directory for archive navigation: %s', ex)
+                    self._net_sibling_cache = None
+                    return
+                names = [e.name for e in entries
+                         if not e.is_dir
+                         and os.path.splitext(e.name)[1].lstrip('.').lower() in archive_exts]
+                tools.alphanumeric_sort(names)
+                log.debug('_build_net_sibling_cache: SMB found %d archive siblings', len(names))
+                current_name = unquote(urlparse(self._source_uri).path.rstrip('/').split('/')[-1])
+                log.debug('_build_net_sibling_cache: current_name=%s', current_name)
+                try:
+                    idx = names.index(current_name)
+                except ValueError:
+                    log.debug('_build_net_sibling_cache: %s not in sibling list (first 5: %s)',
+                              current_name, names[:5])
+                    self._net_sibling_cache = None
+                    return
+                prev_names = list(reversed(names[:idx]))
+                next_names = names[idx + 1:]
+                log.debug('_build_net_sibling_cache: idx=%d, %d prev, %d next',
+                          idx, len(prev_names), len(next_names))
+                self._net_sibling_cache = {
+                    'parent_uri': parent_smb_uri,
+                    'current_uri': self._source_uri,
+                    'prev': [_sc.child_uri(parent_smb_uri, n) for n in prev_names],
+                    'next': [_sc.child_uri(parent_smb_uri, n) for n in next_names],
+                    'complete': True,
+                }
+                return
+
+        log.debug('_build_net_sibling_cache: non-smb:// source_uri=%s, cannot enumerate',
+                  self._source_uri)
+        self._net_sibling_cache = None
+
+    def _set_smb_sibling_cache(self, context):
+        """Pre-populate the sibling cache from an smb_context dict supplied by
+        the SMB browser dialog.  context keys: parent_uri, siblings (list of
+        smb:// URIs sorted, up to ±100 around the selection), complete (bool).
+        """
+        parent_uri = context['parent_uri']
+        siblings   = context['siblings']
+        complete   = context.get('complete', False)
+        current    = self._source_uri
+        try:
+            idx = siblings.index(current)
+        except ValueError:
+            log.debug('_set_smb_sibling_cache: %s not in context siblings', current)
+            return
+        self._net_sibling_cache = {
+            'parent_uri': parent_uri,
+            'current_uri': current,
+            'prev': list(reversed(siblings[:idx])),
+            'next': siblings[idx + 1:],
+            'complete': complete,
+        }
+        log.debug('_set_smb_sibling_cache: %d prev, %d next, complete=%s',
+                  len(self._net_sibling_cache['prev']),
+                  len(self._net_sibling_cache['next']), complete)
+
+    _SIBLING_PREFETCH_THRESHOLD = 10
+
+    def _maybe_prefetch_net_siblings(self):
+        """If the cache is incomplete and we are within THRESHOLD steps of
+        either edge, fetch the full directory listing in a background thread
+        and replace the cache (via GLib.idle_add) once done.
+        """
+        cache = self._net_sibling_cache
+        if cache is None or cache.get('complete', True):
+            return
+        if (len(cache.get('next', [])) > self._SIBLING_PREFETCH_THRESHOLD and
+                len(cache.get('prev', [])) > self._SIBLING_PREFETCH_THRESHOLD):
+            return
+        if self._sibling_fetch_running:
+            return
+        parent_uri = cache['parent_uri']
+        self._sibling_fetch_running = True
+        log.debug('_maybe_prefetch_net_siblings: fetching %s', parent_uri)
+
+        def _fetch():
+            try:
+                from mcomix import smb_client as _sc
+                entries = _sc.list_directory(parent_uri)
+                from gi.repository import GLib
+                GLib.idle_add(self._apply_full_sibling_cache, parent_uri, entries)
+            except Exception as ex:
+                log.debug('_maybe_prefetch_net_siblings: fetch failed: %s', ex)
+                self._sibling_fetch_running = False
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_full_sibling_cache(self, parent_uri, entries):
+        """Called on the main thread after a background sibling fetch completes.
+        Rebuilds the cache around the current _source_uri with the full listing.
+        """
+        self._sibling_fetch_running = False
+        source_uri = self._source_uri
+        if not source_uri:
+            return False
+
+        from urllib.parse import urlparse, unquote as _unquote
+        from mcomix import smb_client as _sc
+
+        archive_exts = set()
+        for _mimes, extensions in archive_tools.get_supported_formats().values():
+            archive_exts.update(ext.lower() for ext in extensions)
+
+        names = [e.name for e in entries
+                 if not e.is_dir and
+                 os.path.splitext(e.name)[1].lstrip('.').lower() in archive_exts]
+        tools.alphanumeric_sort(names)
+
+        current_name = _unquote(urlparse(source_uri).path.rstrip('/').split('/')[-1])
+        try:
+            idx = names.index(current_name)
+        except ValueError:
+            log.debug('_apply_full_sibling_cache: current file not found in listing')
+            return False
+
+        self._net_sibling_cache = {
+            'parent_uri': parent_uri,
+            'current_uri': source_uri,
+            'prev': [_sc.child_uri(parent_uri, n) for n in reversed(names[:idx])],
+            'next': [_sc.child_uri(parent_uri, n) for n in names[idx + 1:]],
+            'complete': True,
+        }
+        log.debug('_apply_full_sibling_cache: %d prev, %d next, complete=True',
+                  idx, len(names) - idx - 1)
+        return False
+
     def _open_next_archive(self, *args):
         """Open the archive that comes directly after the currently loaded
         archive in that archive's directory listing, sorted alphabetically.
         Returns True if a new archive was opened, False otherwise.
         """
         if self.archive_type is not None:
+
+            # For network files the file provider only knows about the single
+            # downloaded temp file; use smb_client enumeration instead.
+            log.debug('_open_next_archive: _source_uri=%s', self._source_uri)
+            if self._source_uri:
+                cache = self._net_sibling_cache
+                if cache is None or cache.get('current_uri') != self._source_uri:
+                    self._build_net_sibling_cache()
+                    cache = self._net_sibling_cache
+                if not cache or not cache['next']:
+                    if cache and not cache.get('complete', True):
+                        self._maybe_prefetch_net_siblings()
+                    log.debug('_open_next_archive: no next archive available')
+                    return False
+                next_uri = cache['next'][0]
+                self._net_sibling_cache = {
+                    'parent_uri': cache['parent_uri'],
+                    'current_uri': next_uri,
+                    'prev': [cache['current_uri']] + cache['prev'],
+                    'next': cache['next'][1:],
+                    'complete': cache.get('complete', False),
+                }
+                self._maybe_prefetch_net_siblings()
+                self._close()
+                self.open_file(next_uri)
+                return True
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
@@ -479,6 +751,32 @@ class FileHandler(object):
         Returns True if a new archive was opened, False otherwise.
         """
         if self.archive_type is not None:
+
+            # For network files the file provider only knows about the single
+            # downloaded temp file; use smb_client enumeration instead.
+            log.debug('_open_previous_archive: _source_uri=%s', self._source_uri)
+            if self._source_uri:
+                cache = self._net_sibling_cache
+                if cache is None or cache.get('current_uri') != self._source_uri:
+                    self._build_net_sibling_cache()
+                    cache = self._net_sibling_cache
+                if not cache or not cache['prev']:
+                    if cache and not cache.get('complete', True):
+                        self._maybe_prefetch_net_siblings()
+                    log.debug('_open_previous_archive: no prev archive available')
+                    return False
+                prev_uri = cache['prev'][0]
+                self._net_sibling_cache = {
+                    'parent_uri': cache['parent_uri'],
+                    'current_uri': prev_uri,
+                    'prev': cache['prev'][1:],
+                    'next': [cache['current_uri']] + cache['next'],
+                    'complete': cache.get('complete', False),
+                }
+                self._maybe_prefetch_net_siblings()
+                self._close()
+                self.open_file(prev_uri, prefs['open first file in prev archive'] - 1)
+                return True
 
             files = self._file_provider.list_files(file_provider.FileProvider.ARCHIVES)
             absolute_path = os.path.abspath(self._base_path)
