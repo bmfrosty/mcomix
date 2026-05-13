@@ -65,23 +65,9 @@ class RecentFilesMenu(Gtk.RecentChooserMenu):
             if not did_file_load:
                 self.remove(path)
         else:
-            # Network URI (smb://, sftp://, …) — mount the enclosing volume
-            # via GVFS first so _resolve_uri can get a local FUSE path.
-            # Gtk.MountOperation shows a credential dialog if needed.
-            gfile = Gio.File.new_for_uri(uri)
-            mount_op = Gtk.MountOperation.new(self._window)
-
-            def _on_mount(source, result, _user_data):
-                try:
-                    source.mount_enclosing_volume_finish(result)
-                except Exception as ex:
-                    log.debug('recent _load: mount failed (%s), trying open anyway', ex)
-                did_file_load = self._window.filehandler.open_file(uri)
-                if not did_file_load:
-                    self.remove(uri)
-
-            gfile.mount_enclosing_volume(
-                Gio.MountMountFlags.NONE, mount_op, None, _on_mount, None)
+            did_file_load = self._window.filehandler.open_file(uri)
+            if not did_file_load:
+                self.remove(uri)
 
     def count(self):
         """ Returns the amount of stored entries. """
