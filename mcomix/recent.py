@@ -91,7 +91,7 @@ class RecentFilesMenu(Gtk.RecentChooserMenu):
         if not preferences.prefs['store recent file info']:
             return
         if '://' in path_or_uri and not path_or_uri.startswith('file://'):
-            uri = path_or_uri
+            uri = _normalize_smb_uri(path_or_uri)
         else:
             uri = portability.uri_prefix() + urllib.request.pathname2url(path_or_uri)
         self._manager.add_item(uri)
@@ -117,6 +117,26 @@ class RecentFilesMenu(Gtk.RecentChooserMenu):
             log.debug(error)
 
 
+def _normalize_smb_uri(uri):
+    """Lowercase host and share name in an smb:// URI for consistent storage."""
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(uri)
+    if parsed.scheme != 'smb':
+        return uri
+    host = (parsed.hostname or '').lower()
+    netloc = host + (f':{parsed.port}' if parsed.port else '')
+    parts = parsed.path.split('/')          # ['', 'Share', 'sub', ...]
+    if len(parts) >= 2:
+        parts[1] = parts[1].lower()         # lowercase share name only
+    return urlunparse((parsed.scheme, netloc, '/'.join(parts), '', '', ''))
+
+
+_SKIP_PATH_PREFIXES = (
+    '/run/user/',       # xdg-desktop-portal doc-portal mounts
+    '/run/flatpak/',    # Flatpak document portal
+)
+
+
 class RecentPathsMenu(Gtk.Menu):
     """Menu listing unique parent directories from recently opened files.
 
@@ -139,8 +159,17 @@ class RecentPathsMenu(Gtk.Menu):
             uri = item.get_uri()
             if uri.startswith('file://'):
                 path = urllib.request.url2pathname(uri[7:])
+                if any(path.startswith(p) for p in _SKIP_PATH_PREFIXES):
+                    continue
+                if 'mcomix_net.' in path:
+                    continue
                 parent = os.path.dirname(path)
                 folder_uri = 'file://' + urllib.request.pathname2url(parent)
+            elif uri.startswith('smb://'):
+                parent = Gio.File.new_for_uri(uri).get_parent()
+                if not parent:
+                    continue
+                folder_uri = _normalize_smb_uri(parent.get_uri())
             else:
                 gfile = Gio.File.new_for_uri(uri)
                 parent = gfile.get_parent()
@@ -172,8 +201,14 @@ class RecentPathsMenu(Gtk.Menu):
         self.show_all()
 
     def _open_at(self, item, folder_uri):
-        from mcomix import file_chooser_main_dialog
-        file_chooser_main_dialog.open_main_filechooser_dialog_at(folder_uri, self._window)
+        if folder_uri.startswith('smb://'):
+            from mcomix import smb_browser_dialog
+            result = smb_browser_dialog.open_smb_dialog(self._window, start_uri=folder_uri)
+            if result:
+                self._window.filehandler.open_file(result.uri, smb_context=result.smb_context)
+        else:
+            from mcomix import file_chooser_main_dialog
+            file_chooser_main_dialog.open_main_filechooser_dialog_at(folder_uri, self._window)
 
 
 # vim: expandtab:sw=4:ts=4

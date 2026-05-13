@@ -20,9 +20,9 @@ from mcomix.i18n import _
 def _open_from_network(action, window):
     """Open the SMB file browser and load the selected file."""
     from mcomix import smb_browser_dialog
-    uri = smb_browser_dialog.open_smb_dialog(window)
-    if uri:
-        window.filehandler.open_file(uri)
+    result = smb_browser_dialog.open_smb_dialog(window)
+    if result:
+        window.filehandler.open_file(result.uri, smb_context=result.smb_context)
 
 
 class MainUI(Gtk.UIManager):
