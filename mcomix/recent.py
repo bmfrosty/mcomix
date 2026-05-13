@@ -172,8 +172,12 @@ class RecentPathsMenu(Gtk.Menu):
         self.show_all()
 
     def _open_at(self, item, folder_uri):
-        from mcomix import file_chooser_main_dialog
-        file_chooser_main_dialog.open_main_filechooser_dialog_at(folder_uri, self._window)
+        if folder_uri.startswith('smb://'):
+            from mcomix import smb_browser_dialog
+            smb_browser_dialog.open_smb_dialog(self._window, start_uri=folder_uri)
+        else:
+            from mcomix import file_chooser_main_dialog
+            file_chooser_main_dialog.open_main_filechooser_dialog_at(folder_uri, self._window)
 
 
 # vim: expandtab:sw=4:ts=4
