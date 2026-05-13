@@ -203,9 +203,9 @@ class RecentPathsMenu(Gtk.Menu):
     def _open_at(self, item, folder_uri):
         if folder_uri.startswith('smb://'):
             from mcomix import smb_browser_dialog
-            uri = smb_browser_dialog.open_smb_dialog(self._window, start_uri=folder_uri)
-            if uri:
-                self._window.filehandler.open_file(uri)
+            result = smb_browser_dialog.open_smb_dialog(self._window, start_uri=folder_uri)
+            if result:
+                self._window.filehandler.open_file(result.uri, smb_context=result.smb_context)
         else:
             from mcomix import file_chooser_main_dialog
             file_chooser_main_dialog.open_main_filechooser_dialog_at(folder_uri, self._window)

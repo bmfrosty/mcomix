@@ -9,6 +9,7 @@ Returns the selected smb:// URI, or None if the user cancelled.
 import json
 import os
 import threading
+from typing import NamedTuple
 from urllib.parse import unquote
 
 from gi.repository import GLib, Gtk, Pango
@@ -31,6 +32,13 @@ _last_dir_uri = None
 _BOOKMARKS_PATH = os.path.join(constants.CONFIG_DIR, 'smb_bookmarks.json')
 
 _BATCH_SIZE = 500
+_SIBLINGS_WINDOW = 100  # how many files before/after the selection to include
+
+
+class SmbPickResult(NamedTuple):
+    """Returned by open_smb_dialog on success."""
+    uri: str         # the selected smb:// file URI
+    smb_context: dict  # parent_uri, siblings (±100 list), complete (bool)
 
 
 def _is_auth_error(ex):
@@ -510,8 +518,36 @@ class _SmbBrowserDialog(Gtk.Dialog):
             if it and not model.get_value(it, 3):
                 name = model.get_value(it, 1)
                 self._result = smb_client.child_uri(self._current_uri, name)
+
+        selected = self._result
         self.destroy()
-        return self._result
+        if not selected:
+            return None
+        return SmbPickResult(uri=selected,
+                             smb_context=self._build_smb_context(selected))
+
+    def _build_smb_context(self, selected_uri):
+        """Collect ±100 openable file URIs around selected_uri from the loaded store."""
+        all_files = []
+        it = self._store.get_iter_first()
+        while it:
+            if not self._store.get_value(it, 3):  # not a directory
+                name = self._store.get_value(it, 1)
+                all_files.append(smb_client.child_uri(self._current_uri, name))
+            it = self._store.iter_next(it)
+
+        try:
+            idx = all_files.index(selected_uri)
+        except ValueError:
+            idx = 0
+
+        start = max(0, idx - _SIBLINGS_WINDOW)
+        end   = min(len(all_files), idx + _SIBLINGS_WINDOW + 1)
+        return {
+            'parent_uri': self._current_uri,
+            'siblings':   all_files[start:end],
+            'complete':   start == 0 and end == len(all_files),
+        }
 
 
 # ---------------------------------------------------------------------------
