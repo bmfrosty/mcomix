@@ -167,6 +167,16 @@ def run():
     if opts.language_code:
         i18n.install_gettext(opts.language_code)
 
+    # Tell GTK3 to use the xdg-desktop-portal file chooser so that
+    # Gtk.FileChooserNative gets the full-featured portal dialog (which
+    # supports network/SMB locations).  Outside a Flatpak sandbox the portal
+    # returns real smb:// URIs rather than doc-portal wrappers, so this is
+    # the right behaviour in both cases.
+    # Must be set before setup_dependencies() imports GTK and before any
+    # FileChooserNative is instantiated, because GDK caches the result.
+    if 'GTK_USE_PORTAL' not in os.environ:
+        os.environ['GTK_USE_PORTAL'] = '1'
+
     setup_dependencies()
 
     from gi.repository import Gdk, GLib, Gtk
@@ -231,5 +241,10 @@ def run():
         Gtk.main()
     except KeyboardInterrupt: # Will not always work because of threading.
         window.terminate_program()
+
+    # terminate_program() has already saved all prefs before calling
+    # Gtk.main_quit().  Exit directly so non-daemon threads (smbprotocol
+    # transport, multiprocessing manager) do not block the process.
+    os._exit(0)
 
 # vim: expandtab:sw=4:ts=4

@@ -1,5 +1,7 @@
 """file_chooser_main_dialog.py - Custom FileChooserDialog implementations."""
 
+from urllib.parse import unquote
+
 from gi.repository import Gtk
 
 from mcomix.preferences import prefs
@@ -11,7 +13,7 @@ class _MainFileChooserDialog(file_chooser_base_dialog._BaseFileChooserDialog):
 
     """The normal filechooser dialog used with the "Open" menu item."""
 
-    def __init__(self, window):
+    def __init__(self, window, start_folder=None):
         super(_MainFileChooserDialog, self).__init__()
         self._window = window
         self.set_transient_for(window)
@@ -30,6 +32,9 @@ class _MainFileChooserDialog(file_chooser_base_dialog._BaseFileChooserDialog):
                 prefs['last filter in main filechooser']])
         except:
             self.filechooser.set_filter(filters[0])
+
+        if start_folder:
+            self.filechooser.set_current_folder(start_folder)
 
     def files_chosen(self, paths):
         if paths:
@@ -59,6 +64,21 @@ def open_main_filechooser_dialog(action, window):
         _main_filechooser_dialog = _MainFileChooserDialog(window)
     else:
         _main_filechooser_dialog.present()
+
+
+def open_main_filechooser_dialog_at(folder_uri, window):
+    """Open the main filechooser dialog pre-navigated to folder_uri.
+
+    folder_uri may be a file:// URI or a local path.
+    Called by RecentPathsMenu when the user clicks a local recent directory.
+    """
+    global _main_filechooser_dialog
+    if folder_uri.startswith('file://'):
+        folder_path = unquote(folder_uri[7:])
+    else:
+        folder_path = folder_uri
+    _close_main_filechooser_dialog()
+    _main_filechooser_dialog = _MainFileChooserDialog(window, start_folder=folder_path)
 
 
 def _close_main_filechooser_dialog(*args):
