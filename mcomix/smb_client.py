@@ -112,7 +112,7 @@ def get_credentials(host: str):
 # Public API
 # ---------------------------------------------------------------------------
 
-def list_directory(smb_uri: str) -> list:
+def list_directory(smb_uri: str, progress_cb=None) -> list:
     """List the directory at smb_uri.
 
     Returns a sorted list of DirEntry: directories first (alpha), then files
@@ -140,7 +140,7 @@ def list_directory(smb_uri: str) -> list:
         # Try Samba guest/anonymous before prompting for credentials.
         try:
             _register(host, 'guest', '')
-            raw = _scandir(unc)
+            raw = _scandir(unc, progress_cb=progress_cb)
             _credentials[host] = ('guest', '')  # cache without re-registering
             log.debug('smb_client: guest access OK for %s', host)
             return _sort_entries(raw)
@@ -152,7 +152,7 @@ def list_directory(smb_uri: str) -> list:
     # Ensure the session is registered (handles app restarts / cache reset).
     username, password = _credentials[host]
     _register(host, username, password)
-    return _sort_entries(_scandir(unc))
+    return _sort_entries(_scandir(unc, progress_cb=progress_cb))
 
 
 def _list_servers() -> list:
@@ -381,8 +381,12 @@ def _list_shares(host: str) -> list:
     ) from last_ex
 
 
-def _scandir(unc: str) -> list:
-    """Scan a UNC path; session must already be registered."""
+def _scandir(unc: str, progress_cb=None) -> list:
+    """Scan a UNC path; session must already be registered.
+
+    progress_cb, if given, is called with the running entry count every 500
+    entries.  It is invoked from whatever thread calls _scandir.
+    """
     import smbclient
     raw = []
     for entry in smbclient.scandir(unc):
@@ -391,6 +395,8 @@ def _scandir(unc: str) -> list:
         except Exception:
             size = 0
         raw.append(DirEntry(entry.name, entry.is_dir(), size))
+        if progress_cb and len(raw) % 500 == 0:
+            progress_cb(len(raw))
     return raw
 
 

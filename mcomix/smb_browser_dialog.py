@@ -385,13 +385,21 @@ class _SmbBrowserDialog(Gtk.Dialog):
         self._filter_entry.set_text('')
 
         def _worker():
+            def _on_progress(count):
+                GLib.idle_add(self._update_fetch_status, uri, count)
             try:
-                entries = smb_client.list_directory(uri)
+                entries = smb_client.list_directory(uri, progress_cb=_on_progress)
                 GLib.idle_add(self._begin_populate, uri, entries)
             except Exception as ex:
                 GLib.idle_add(self._populate_error, uri, ex)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_fetch_status(self, uri, count):
+        if not self._alive:
+            return False
+        self._status.set_text(f'Loading {uri}… {count:,} entries so far')
+        return False
 
     def _populate_error(self, uri, error):
         if not self._alive:
