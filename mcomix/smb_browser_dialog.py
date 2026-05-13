@@ -6,13 +6,14 @@ Entry point:
 Returns the selected smb:// URI, or None if the user cancelled.
 """
 
+import json
 import os
 import threading
+from urllib.parse import unquote
 
-from gi.repository import GLib, Gtk
+from gi.repository import GLib, Gtk, Pango
 
-from mcomix import log
-from mcomix import smb_client
+from mcomix import constants, log, smb_client
 
 _OPENABLE_EXTS = frozenset([
     '.cbz', '.cbr', '.cbt', '.cb7', '.cba',
@@ -25,12 +26,43 @@ _OPENABLE_EXTS = frozenset([
 _AUTH_KEYWORDS = ('logon', 'authentication', 'credential', 'password',
                   'ntlm', 'spnego', 'access', 'unauthor')
 
+_last_dir_uri = None
 
-_last_dir_uri = None  # session-level memory of the last navigated SMB directory
+_BOOKMARKS_PATH = os.path.join(constants.CONFIG_DIR, 'smb_bookmarks.json')
+
+_BATCH_SIZE = 500
 
 
 def _is_auth_error(ex):
     return any(k in str(ex).lower() for k in _AUTH_KEYWORDS)
+
+
+def _bookmark_label(uri):
+    """Short display label for a bookmark URI."""
+    display = unquote(uri)
+    if display.startswith('smb://'):
+        display = display[6:]
+    return display.rstrip('/') or 'smb://'
+
+
+def _load_bookmarks():
+    try:
+        with open(_BOOKMARKS_PATH) as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [str(u) for u in data if u]
+    except Exception:
+        pass
+    return []
+
+
+def _save_bookmarks(bookmarks):
+    try:
+        os.makedirs(os.path.dirname(_BOOKMARKS_PATH), exist_ok=True)
+        with open(_BOOKMARKS_PATH, 'w') as f:
+            json.dump(bookmarks, f, indent=2)
+    except Exception as ex:
+        log.debug('smb_browser: save_bookmarks: %s', ex)
 
 
 def _default_smb_uri():
@@ -121,9 +153,16 @@ class _SmbBrowserDialog(Gtk.Dialog):
         self._current_uri = (start_uri or '').rstrip('/')
         self._loading = False
         self._alive = True
+        self._bookmarks = _load_bookmarks()
+        # Batch-insert state
+        self._pending_entries = None
+        self._pending_uri = None
+        self._pending_offset = 0
+        self._pending_n_dirs = 0
+        self._pending_n_files = 0
         self.connect('destroy', lambda *_: setattr(self, '_alive', False))
 
-        self.set_default_size(760, 520)
+        self.set_default_size(940, 580)
         self.add_buttons('_Cancel', Gtk.ResponseType.CANCEL,
                          '_Open',   Gtk.ResponseType.ACCEPT)
         self._open_btn = self.get_widget_for_response(Gtk.ResponseType.ACCEPT)
@@ -139,11 +178,49 @@ class _SmbBrowserDialog(Gtk.Dialog):
         content = self.get_content_area()
         content.set_spacing(0)
 
-        # ── Address bar ────────────────────────────────────────────────
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_margin_start(6)
+        paned.set_margin_end(6)
+        paned.set_margin_top(6)
+        paned.set_margin_bottom(2)
+        paned.set_position(200)
+
+        # ── Left: bookmarks panel ──────────────────────────────────────
+        bm_outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+
+        bm_label = Gtk.Label(label='Bookmarks', halign=Gtk.Align.START)
+        bm_outer.pack_start(bm_label, False, False, 0)
+
+        bm_scroll = Gtk.ScrolledWindow()
+        bm_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        bm_scroll.set_min_content_width(180)
+        bm_scroll.set_shadow_type(Gtk.ShadowType.IN)
+
+        self._bm_listbox = Gtk.ListBox()
+        self._bm_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._bm_listbox.connect('row-activated', self._on_bookmark_activated)
+        bm_scroll.add(self._bm_listbox)
+        bm_outer.pack_start(bm_scroll, True, True, 0)
+
+        bm_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        add_bm_btn = Gtk.Button(label='+ Add')
+        add_bm_btn.set_tooltip_text('Bookmark current folder')
+        add_bm_btn.connect('clicked', self._add_bookmark)
+        rem_bm_btn = Gtk.Button(label='− Remove')
+        rem_bm_btn.set_tooltip_text('Remove selected bookmark')
+        rem_bm_btn.connect('clicked', self._remove_bookmark)
+        bm_btn_box.pack_start(add_bm_btn, True, True, 0)
+        bm_btn_box.pack_start(rem_bm_btn, True, True, 0)
+        bm_outer.pack_start(bm_btn_box, False, False, 0)
+
+        paned.pack1(bm_outer, resize=False, shrink=False)
+
+        # ── Right: address bar + filter + file list + status ───────────
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # Address bar
         addr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        addr_box.set_margin_start(6)
-        addr_box.set_margin_end(6)
-        addr_box.set_margin_top(6)
+        addr_box.set_margin_start(4)
         addr_box.set_margin_bottom(2)
 
         addr_box.pack_start(Gtk.Label(label='Location:'), False, False, 0)
@@ -160,19 +237,36 @@ class _SmbBrowserDialog(Gtk.Dialog):
         up_btn.connect('clicked', lambda _b: self._go_parent())
         addr_box.pack_start(up_btn, False, False, 4)
 
-        content.pack_start(addr_box, False, False, 0)
+        right_box.pack_start(addr_box, False, False, 0)
 
-        # ── File listing ───────────────────────────────────────────────
+        # Filter bar
+        filter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        filter_box.set_margin_start(4)
+        filter_box.set_margin_top(2)
+        filter_box.set_margin_bottom(2)
+
+        filter_box.pack_start(Gtk.Label(label='Filter:'), False, False, 0)
+
+        self._filter_entry = Gtk.SearchEntry()
+        self._filter_entry.set_placeholder_text('Filter files and folders…')
+        self._filter_entry.connect('search-changed', self._on_filter_changed)
+        filter_box.pack_start(self._filter_entry, True, True, 4)
+
+        right_box.pack_start(filter_box, False, False, 0)
+
+        # File listing
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.ALWAYS)
-        scroll.set_margin_start(6)
-        scroll.set_margin_end(6)
+        scroll.set_shadow_type(Gtk.ShadowType.IN)
         scroll.set_margin_top(2)
         scroll.set_margin_bottom(2)
 
         # columns: icon, name, size_str, is_dir
         self._store = Gtk.ListStore(str, str, str, bool)
-        self._tree = Gtk.TreeView(model=self._store)
+        self._filter_model = self._store.filter_new()
+        self._filter_model.set_visible_func(self._row_visible)
+
+        self._tree = Gtk.TreeView(model=self._filter_model)
         self._tree.set_headers_visible(True)
 
         icon_col = Gtk.TreeViewColumn('', Gtk.CellRendererText(), text=0)
@@ -191,18 +285,77 @@ class _SmbBrowserDialog(Gtk.Dialog):
         self._tree.get_selection().connect('changed', self._on_selection_changed)
 
         scroll.add(self._tree)
-        content.pack_start(scroll, True, True, 0)
+        right_box.pack_start(scroll, True, True, 0)
 
-        # ── Status bar ─────────────────────────────────────────────────
+        # Status bar
         self._status = Gtk.Label(label='Enter an smb:// address and press Go.',
                                  halign=Gtk.Align.START, xalign=0.0)
-        self._status.set_margin_start(6)
-        self._status.set_margin_end(6)
+        self._status.set_margin_start(4)
         self._status.set_margin_top(2)
         self._status.set_margin_bottom(4)
-        content.pack_start(self._status, False, False, 0)
+        right_box.pack_start(self._status, False, False, 0)
 
+        paned.pack2(right_box, resize=True, shrink=True)
+
+        content.pack_start(paned, True, True, 0)
         content.show_all()
+
+        self._rebuild_bookmarks_panel()
+
+    # ------------------------------------------------------------------
+    # Bookmarks
+    # ------------------------------------------------------------------
+
+    def _rebuild_bookmarks_panel(self):
+        for child in list(self._bm_listbox.get_children()):
+            self._bm_listbox.remove(child)
+        for uri in self._bookmarks:
+            lbl = Gtk.Label(label=_bookmark_label(uri),
+                            halign=Gtk.Align.START, xalign=0.0)
+            lbl.set_max_width_chars(24)
+            lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            lbl.set_tooltip_text(uri)
+            row = Gtk.ListBoxRow()
+            row.add(lbl)
+            self._bm_listbox.add(row)
+        self._bm_listbox.show_all()
+
+    def _on_bookmark_activated(self, _listbox, row):
+        idx = row.get_index()
+        if 0 <= idx < len(self._bookmarks):
+            self._navigate(self._bookmarks[idx])
+
+    def _add_bookmark(self, *args):
+        uri = self._current_uri
+        if not uri or not uri.startswith('smb://'):
+            return
+        if uri not in self._bookmarks:
+            self._bookmarks.append(uri)
+            _save_bookmarks(self._bookmarks)
+            self._rebuild_bookmarks_panel()
+
+    def _remove_bookmark(self, *args):
+        row = self._bm_listbox.get_selected_row()
+        if row is None:
+            return
+        idx = row.get_index()
+        if 0 <= idx < len(self._bookmarks):
+            del self._bookmarks[idx]
+            _save_bookmarks(self._bookmarks)
+            self._rebuild_bookmarks_panel()
+
+    # ------------------------------------------------------------------
+    # Filter
+    # ------------------------------------------------------------------
+
+    def _row_visible(self, model, it, _data=None):
+        text = self._filter_entry.get_text().lower()
+        if not text:
+            return True
+        return text in model.get_value(it, 1).lower()
+
+    def _on_filter_changed(self, _entry):
+        self._filter_model.refilter()
 
     # ------------------------------------------------------------------
     # Navigation
@@ -226,58 +379,94 @@ class _SmbBrowserDialog(Gtk.Dialog):
             return
         self._loading = True
         self._status.set_text(f'Loading {uri} …')
+        self._tree.set_model(None)
         self._store.clear()
         self._open_btn.set_sensitive(False)
+        self._filter_entry.set_text('')
 
         def _worker():
             try:
                 entries = smb_client.list_directory(uri)
-                GLib.idle_add(self._populate, uri, entries, None)
+                GLib.idle_add(self._begin_populate, uri, entries)
             except Exception as ex:
-                GLib.idle_add(self._populate, uri, None, ex)
+                GLib.idle_add(self._populate_error, uri, ex)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _populate(self, uri, entries, error):
+    def _populate_error(self, uri, error):
         if not self._alive:
             return False
         self._loading = False
-
-        if error is not None:
-            log.debug('smb_browser: list_directory %s: %s', uri, error)
-            if _is_auth_error(error):
-                from urllib.parse import urlparse
-                host = urlparse(uri).hostname or uri
-                existing, _ = smb_client.get_credentials(host)
-                creds = _ask_credentials(self, host, existing)
-                if creds:
-                    smb_client.set_credentials(host, *creds)
-                    self._navigate(uri)
-                else:
-                    self._status.set_text('Authentication cancelled.')
+        self._tree.set_model(self._filter_model)
+        log.debug('smb_browser: list_directory %s: %s', uri, error)
+        if _is_auth_error(error):
+            from urllib.parse import urlparse
+            host = urlparse(uri).hostname or uri
+            existing, _ = smb_client.get_credentials(host)
+            creds = _ask_credentials(self, host, existing)
+            if creds:
+                smb_client.set_credentials(host, *creds)
+                self._navigate(uri)
             else:
-                self._status.set_text(f'Error: {error}')
-            return False
+                self._status.set_text('Authentication cancelled.')
+        else:
+            self._status.set_text(f'Error: {error}')
+        return False
 
+    def _begin_populate(self, uri, entries):
+        if not self._alive:
+            return False
         global _last_dir_uri
         _last_dir_uri = uri
         self._current_uri = uri
         self._addr_entry.set_text(uri)
-        self._store.clear()
 
-        n_dirs = n_files = 0
-        for entry in entries:
+        self._pending_entries = entries
+        self._pending_uri = uri
+        self._pending_offset = 0
+        self._pending_n_dirs = 0
+        self._pending_n_files = 0
+
+        n = len(entries)
+        if n > _BATCH_SIZE:
+            self._status.set_text(f'Populating… 0 / {n}')
+        GLib.idle_add(self._populate_batch)
+        return False
+
+    def _populate_batch(self):
+        if not self._alive:
+            return False
+
+        entries = self._pending_entries
+        offset  = self._pending_offset
+        end     = min(offset + _BATCH_SIZE, len(entries))
+
+        for i in range(offset, end):
+            entry = entries[i]
             if entry.is_dir:
                 self._store.append(['📁', entry.name, '', True])
-                n_dirs += 1
+                self._pending_n_dirs += 1
             else:
                 ext = os.path.splitext(entry.name)[1].lower()
                 if ext not in _OPENABLE_EXTS:
                     continue
                 self._store.append(['📄', entry.name, _fmt_size(entry.size), False])
-                n_files += 1
+                self._pending_n_files += 1
 
-        self._status.set_text(f'{uri}   —   {n_dirs} folder(s), {n_files} file(s)')
+        self._pending_offset = end
+
+        if end < len(entries):
+            self._status.set_text(
+                f'Populating… {end} / {len(entries)}')
+            return True  # schedule next batch
+
+        # All batches done — reattach model and update status
+        self._tree.set_model(self._filter_model)
+        uri = self._pending_uri
+        nd, nf = self._pending_n_dirs, self._pending_n_files
+        self._status.set_text(f'{uri}   —   {nd} folder(s), {nf} file(s)')
+        self._pending_entries = None
+        self._loading = False
         return False
 
     # ------------------------------------------------------------------
@@ -290,9 +479,9 @@ class _SmbBrowserDialog(Gtk.Dialog):
         self._open_btn.set_sensitive(is_file)
 
     def _on_row_activated(self, _tree, path, _col):
-        it = self._store.get_iter(path)
-        is_dir = self._store.get_value(it, 3)
-        name   = self._store.get_value(it, 1)
+        it = self._filter_model.get_iter(path)
+        is_dir = self._filter_model.get_value(it, 3)
+        name   = self._filter_model.get_value(it, 1)
         target = smb_client.child_uri(self._current_uri, name)
         if is_dir:
             self._navigate(target)
