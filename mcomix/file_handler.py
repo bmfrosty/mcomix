@@ -85,91 +85,27 @@ class FileHandler(object):
 
         self.last_read_page.set_enabled(bool(prefs['store recent file info']))
 
-    def _scan_fds_for_backing_path(self, doc_portal_path):
-        """Scan /proc/self/fd/ for the real backing path of a document-portal file.
-
-        When the kernel uses FUSE passthrough mode (Linux 5.16+) the file
-        descriptor obtained by open()-ing a FUSE file points directly to the
-        backing file rather than the FUSE path.  In that case readlink on the
-        /proc/self/fd/<n> entry reveals the real path (e.g. an smb:// location
-        cached by the portal daemon) which we can use for sibling enumeration.
-
-        Returns the backing path string, or None if not found.
-        """
-        import glob
-        basename = os.path.basename(doc_portal_path)
-        log.debug('_scan_fds: looking for fd with basename=%s', basename)
-        for fd_link in sorted(glob.glob('/proc/self/fd/*')):
-            try:
-                target = os.readlink(fd_link)
-                log.debug('_scan_fds: %s -> %s', fd_link, target)
-                if os.path.basename(target) == basename and target != doc_portal_path:
-                    log.debug('_scan_fds: backing path found: %s', target)
-                    return target
-            except OSError:
-                pass
-        log.debug('_scan_fds: no backing path found')
-        return None
-
-    @staticmethod
-    def _normalize_kio_fuse_path(path):
-        """Lowercase host and share name in a KIO FUSE path for consistent keys.
-
-        KIO FUSE path structure: /run/user/<uid>/kio-fuse-<id>/<scheme>/<host>/<share>/...
-        SMB share names are case-insensitive, but different code paths (direct
-        file-chooser vs _try_kio_fuse_path) may produce different capitalizations.
-        Normalizing here makes last_read_page lookups consistent.
-        """
-        m = re.match(r'^(/run/user/\d+/kio-fuse-[^/]+/[^/]+/)([^/]+)/([^/]+)/(.+)$', path)
-        if m:
-            return m.group(1) + m.group(2).lower() + '/' + m.group(3).lower() + '/' + m.group(4)
-        return path
-
     def _resolve_uri(self, path):
         """Resolve a path or list of paths that may be URIs to local paths.
 
-        For GIO locations that have a local POSIX mount (e.g. GVFS smb
-        mounts under /run/user/*/gvfs/…) the local path is returned directly.
-        For truly non-local URIs the file is copied to a per-open temp dir
-        so the rest of the pipeline can work on a normal local path.
+        For smb:// URIs, copies the file via smbprotocol to a per-open temp
+        dir and sets _source_uri so sibling navigation works.  Falls back to
+        GIO copy for other non-local URIs.
 
         Returns the same structure (string or list) as was passed in.
         """
         if isinstance(path, list):
             return [self._resolve_uri(p) for p in path]
         if '://' not in path:
-            # KIO FUSE paths are treated as plain local paths — the local file
-            # provider enumerates siblings via the FUSE mount.  _archive_opened
-            # extracts the smb:// URI for recents without setting _source_uri.
-            return self._normalize_kio_fuse_path(path)
+            return path  # already a local path
         from gi.repository import Gio
         log.debug('_resolve_uri: input URI=%s', path)
         gfile = Gio.File.new_for_uri(path)
         local = gfile.get_path()
         if local:
             log.debug('_resolve_uri: resolved to local path=%s', local)
-            if not path.startswith('file://'):
-                # Non-file URI (smb://, sftp://, …) with a GVFS local path —
-                # store the original URI so GIO can enumerate the remote dir.
-                self._source_uri = path
-                log.debug('_resolve_uri: set _source_uri=%s', path)
-            elif '/run/user/' in local and '/gvfs/' in local:
-                # file:// URI resolving to a GVFS path (navigation step after
-                # readlink recovered the real path).  Keep it as _source_uri so
-                # subsequent prev/next presses continue to enumerate the same dir.
-                self._source_uri = path
-                log.debug('_resolve_uri: GVFS file:// URI -> _source_uri=%s', path)
-            return self._normalize_kio_fuse_path(local)
-        # No GVFS FUSE path — try KIO FUSE (KDE) before falling back to copy.
-        kio_path = self._try_kio_fuse_path(path)
-        if kio_path:
-            # Treat as local — don't set _source_uri so the file provider
-            # handles sibling navigation via the FUSE mount.
-            kio_path = self._normalize_kio_fuse_path(kio_path)
-            log.debug('_resolve_uri: KIO FUSE mountUrl -> %s', kio_path)
-            return kio_path
-        # For smb:// URIs, use smbprotocol directly when KIO FUSE is unavailable
-        # (e.g. inside the Flatpak sandbox where KIO FUSE D-Bus is not accessible).
+            return local
+        # For smb:// URIs, use smbprotocol directly.
         if path.startswith('smb://'):
             from mcomix import smb_client as _sc
             if _sc.is_available():
@@ -204,32 +140,6 @@ class FileHandler(object):
         self._source_uri = path
         log.debug('_resolve_uri: no local path, copied to tmp=%s, _source_uri=%s', tmp_path, path)
         return tmp_path
-
-    def _try_kio_fuse_path(self, uri):
-        """Ask the KIO FUSE daemon to mount uri and return its local FUSE path.
-
-        Returns the POSIX path string on success, or None if KIO FUSE is
-        unavailable or does not support the URI scheme.
-        """
-        try:
-            from gi.repository import Gio, GLib
-            conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-            result = conn.call_sync(
-                'org.kde.KIOFuse',
-                '/org/kde/KIOFuse',
-                'org.kde.KIOFuse.VFS',
-                'mountUrl',
-                GLib.Variant('(s)', (uri,)),
-                GLib.VariantType('(s)'),
-                Gio.DBusCallFlags.NONE,
-                30000,
-                None,
-            )
-            local_path = result.get_child_value(0).get_string()
-            return local_path if local_path else None
-        except Exception as ex:
-            log.debug('_try_kio_fuse_path: %s', ex)
-            return None
 
     def refresh_file(self, *args, **kwargs):
         """ Closes the current file(s)/archive and reloads them. """
@@ -295,15 +205,6 @@ class FileHandler(object):
                 self._window.osd.show(str(ex))
                 self.file_opened()
                 return False
-            # After the archive is open its file descriptor is live.  If the
-            # file came from the document portal and we have no _source_uri yet,
-            # check /proc/self/fd/ for a FUSE-passthrough backing path.
-            if not self._source_uri and '/run/user/' in self._current_file and '/doc/' in self._current_file:
-                backing = self._scan_fds_for_backing_path(self._current_file)
-                if backing and '/doc/' not in backing:
-                    from gi.repository import Gio
-                    self._source_uri = Gio.File.new_for_path(backing).get_uri()
-                    log.debug('open_file: fd-scan backing path -> _source_uri=%s', self._source_uri)
             self.file_loading = True
         else:
             image_files, current_image_index = \
@@ -361,17 +262,7 @@ class FileHandler(object):
 
             self.write_fileinfo_file()
 
-        kio_m = re.match(r'^/run/user/\d+/kio-fuse-[^/]+/([^/]+)/(.+)$',
-                         self._current_file)
-        if kio_m:
-            from urllib.parse import unquote, quote as _quote
-            scheme = kio_m.group(1)
-            parts = _quote(unquote(kio_m.group(2)), safe='/').split('/', 2)
-            parts[0] = parts[0].lower()          # normalize host (case-insensitive)
-            if len(parts) > 1:
-                parts[1] = parts[1].lower()      # normalize share name (case-insensitive)
-            recent_target = scheme + '://' + '/'.join(parts)
-        elif self._source_uri and not self._source_uri.startswith('file://'):
+        if self._source_uri and not self._source_uri.startswith('file://'):
             recent_target = self._source_uri
         else:
             recent_target = self._current_file
@@ -667,8 +558,6 @@ class FileHandler(object):
         for mime_types, extensions in archive_tools.get_supported_formats().values():
             archive_exts.update(ext.lower() for ext in extensions)
 
-        # For smb:// URIs use smbprotocol directly — GIO cannot enumerate SMB
-        # shares inside the Flatpak sandbox (no GVFS FUSE mount available).
         if self._source_uri and self._source_uri.startswith('smb://'):
             from mcomix import smb_client as _sc
             from urllib.parse import urlparse, unquote
@@ -711,57 +600,9 @@ class FileHandler(object):
                 }
                 return
 
-        # GIO path for GVFS FUSE mounts and other network URIs.
-        from gi.repository import Gio
-        gfile = Gio.File.new_for_uri(self._source_uri)
-        parent = gfile.get_parent()
-        if parent is None:
-            log.debug('_build_net_sibling_cache: no parent, cannot enumerate')
-            self._net_sibling_cache = None
-            return
-        log.debug('_build_net_sibling_cache: enumerating parent=%s', parent.get_uri())
-        try:
-            enumerator = parent.enumerate_children(
-                'standard::name', Gio.FileQueryInfoFlags.NONE, None)
-        except Exception as ex:
-            log.error('Could not list remote directory for archive navigation: %s', ex)
-            self._net_sibling_cache = None
-            return
-
-        names = []
-        while True:
-            info = enumerator.next_file(None)
-            if info is None:
-                break
-            name = info.get_name()
-            if os.path.splitext(name)[1].lstrip('.').lower() in archive_exts:
-                names.append(name)
-        enumerator.close(None)
-
-        tools.alphanumeric_sort(names)
-        log.debug('_build_net_sibling_cache: found %d archive siblings', len(names))
-
-        current_name = gfile.get_basename()
-        log.debug('_build_net_sibling_cache: current_name=%s', current_name)
-        try:
-            idx = names.index(current_name)
-        except ValueError:
-            log.debug('_build_net_sibling_cache: current_name not found in sibling list (first 5: %s)',
-                      names[:5])
-            self._net_sibling_cache = None
-            return
-
-        parent_uri = parent.get_uri()
-        prev_names = list(reversed(names[:idx]))
-        next_names = names[idx + 1:]
-        log.debug('_build_net_sibling_cache: idx=%d, %d prev, %d next', idx, len(prev_names), len(next_names))
-        self._net_sibling_cache = {
-            'parent_uri': parent_uri,
-            'current_uri': self._source_uri,
-            'prev': [parent.get_child(n).get_uri() for n in prev_names],
-            'next': [parent.get_child(n).get_uri() for n in next_names],
-            'complete': True,
-        }
+        log.debug('_build_net_sibling_cache: non-smb:// source_uri=%s, cannot enumerate',
+                  self._source_uri)
+        self._net_sibling_cache = None
 
     def _set_smb_sibling_cache(self, context):
         """Pre-populate the sibling cache from an smb_context dict supplied by
