@@ -42,6 +42,7 @@ def load_icons() -> None:
               ('manga.png',                  'mcomix-manga'),
               ('fitbest.png',                'mcomix-fitbest'),
               ('fitwidth.png',               'mcomix-fitwidth'),
+              ('continuous-scroll.png',      'mcomix-continuous-scroll'),
               ('fitheight.png',              'mcomix-fitheight'),
               ('fitmanual.png',              'mcomix-fitmanual'),
               ('fitsize.png',                'mcomix-fitsize'))
