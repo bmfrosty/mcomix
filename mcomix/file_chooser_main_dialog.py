@@ -1,6 +1,6 @@
 """file_chooser_main_dialog.py - Custom FileChooserDialog implementations."""
 
-import urllib.request
+from urllib.parse import unquote
 
 from gi.repository import Gtk
 
@@ -74,7 +74,7 @@ def open_main_filechooser_dialog_at(folder_uri, window):
     """
     global _main_filechooser_dialog
     if folder_uri.startswith('file://'):
-        folder_path = urllib.request.url2pathname(folder_uri[7:])
+        folder_path = unquote(folder_uri[7:])
     else:
         folder_path = folder_uri
     _close_main_filechooser_dialog()

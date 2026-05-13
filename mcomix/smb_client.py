@@ -8,7 +8,6 @@ Public API (all paths use smb:// URIs):
     is_available()           -> bool
 """
 
-import io
 import struct
 from typing import NamedTuple
 from urllib.parse import urlparse, unquote, quote
