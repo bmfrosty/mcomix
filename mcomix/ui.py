@@ -17,6 +17,14 @@ from mcomix.preferences import prefs
 from mcomix.library import main_dialog as library_main_dialog
 from mcomix.i18n import _
 
+def _open_from_network(action, window):
+    """Open the SMB file browser and load the selected file."""
+    from mcomix import smb_browser_dialog
+    result = smb_browser_dialog.open_smb_dialog(window)
+    if result:
+        window.filehandler.open_file(result.uri, smb_context=result.smb_context)
+
+
 class MainUI(Gtk.UIManager):
 
     def __init__(self, window):
@@ -89,6 +97,7 @@ class MainUI(Gtk.UIManager):
                 None, None, window.extract_page),
             ('menu_zoom', 'mcomix-zoom', _('_Zoom')),
             ('menu_recent', Gtk.STOCK_FILE, _('_Recent')),
+            ('menu_recent_paths', Gtk.STOCK_DIRECTORY, _('Recent _Paths')),
             ('menu_bookmarks_popup', 'comix-add-bookmark', _('_Bookmarks')),
             ('menu_bookmarks', None, _('_Bookmarks')),
             ('menu_toolbars', None, _('T_oolbars')),
@@ -194,6 +203,8 @@ class MainUI(Gtk.UIManager):
                 edit_dialog.open_dialog),
             ('open', Gtk.STOCK_OPEN, _('_Open...'),
                 None, None, file_chooser_main_dialog.open_main_filechooser_dialog),
+            ('open_from_network', Gtk.STOCK_NETWORK, _('Open from _Network...'),
+                '<Ctrl><Shift>o', None, _open_from_network),
             ('enhance_image', 'mcomix-enhance-image', _('En_hance image...'),
                 None, None, enhance_dialog.open_dialog)], window)
 
@@ -233,7 +244,9 @@ class MainUI(Gtk.UIManager):
             <menubar name="Menu">
                 <menu action="menu_file">
                     <menuitem action="open" />
+                    <menuitem action="open_from_network" />
                     <menu action="menu_recent" />
+                    <menu action="menu_recent_paths" />
                     <menuitem action="library" />
                     <separator />
                     <menuitem action="extract_page" />
@@ -388,7 +401,9 @@ class MainUI(Gtk.UIManager):
                 </menu>
                 <separator />
                 <menuitem action="open" />
+                <menuitem action="open_from_network" />
                 <menu action="menu_recent" />
+                <menu action="menu_recent_paths" />
                 <menuitem action="library" />
                 <separator />
                 <menu action="menu_open_with_popup"></menu>
@@ -419,6 +434,14 @@ class MainUI(Gtk.UIManager):
         self.recentPopup = recent.RecentFilesMenu(self, window)
         self.get_widget('/Popup/menu_recent').set_submenu(self.recentPopup)
         self.get_widget('/Popup/menu_recent').show()
+
+        self.recentPaths = recent.RecentPathsMenu(window)
+        self.get_widget('/Menu/menu_file/menu_recent_paths').set_submenu(self.recentPaths)
+        self.get_widget('/Menu/menu_file/menu_recent_paths').show()
+
+        self.recentPathsPopup = recent.RecentPathsMenu(window)
+        self.get_widget('/Popup/menu_recent_paths').set_submenu(self.recentPathsPopup)
+        self.get_widget('/Popup/menu_recent_paths').show()
 
         openwith = openwith_menu.OpenWithMenu(self, window)
         self.get_widget('/Menu/menu_file/menu_open_with').set_submenu(openwith)
