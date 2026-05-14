@@ -9,6 +9,7 @@ from mcomix import tools
 
 APPNAME = 'MComix'
 VERSION = '3.2.0-dev0'
+FORK_PR = 20  # Update with each PR; CI enforces this matches the actual PR number
 
 HOME_DIR = tools.get_home_directory()
 CONFIG_DIR = tools.get_config_directory()

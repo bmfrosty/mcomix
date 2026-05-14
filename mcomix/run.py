@@ -159,6 +159,7 @@ def run():
 
     # First things first: set the log level.
     log.setLevel(opts.loglevel)
+    log.info('MComix version %s', constants.VERSION)
 
     # Reconfigure stdout to replace characters that cannot be printed
     if hasattr(sys.stdout, 'reconfigure'):

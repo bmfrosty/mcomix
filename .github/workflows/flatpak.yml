@@ -1,0 +1,96 @@
+name: Flatpak CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check-manifest:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify manifest pins current base-branch HEAD
+        run: |
+          pinned=$(grep -A3 'url: https://github.com/bmfrosty/mcomix.git' \
+            io.github.bmfrosty.mcomix.yml | grep 'commit:' | awk '{print $2}')
+          base_head=$(git rev-parse origin/${{ github.base_ref }})
+          if [ "$pinned" != "$base_head" ]; then
+            echo "::error::Manifest pins mcomix at ${pinned:0:8} but ${{ github.base_ref }} HEAD is ${base_head:0:8}. Update the commit in io.github.bmfrosty.mcomix.yml to: $base_head"
+            exit 1
+          fi
+      - name: Verify FORK_PR matches this PR number
+        run: |
+          fork_pr=$(sed -n 's/^FORK_PR = \([0-9]*\).*/\1/p' mcomix/constants.py)
+          if [ "$fork_pr" != "${{ github.event.pull_request.number }}" ]; then
+            echo "::error::FORK_PR in mcomix/constants.py is $fork_pr but this PR is #${{ github.event.pull_request.number }}. Set FORK_PR = ${{ github.event.pull_request.number }} in mcomix/constants.py."
+            exit 1
+          fi
+      - name: Verify MCOMIX_FORK_PR in manifest matches this PR number
+        run: |
+          manifest_pr=$(grep 'MCOMIX_FORK_PR:' io.github.bmfrosty.mcomix.yml | sed 's/.*MCOMIX_FORK_PR: *"\?\([0-9]*\)"\?.*/\1/')
+          if [ "$manifest_pr" != "${{ github.event.pull_request.number }}" ]; then
+            echo "::error::MCOMIX_FORK_PR in io.github.bmfrosty.mcomix.yml is $manifest_pr but this PR is #${{ github.event.pull_request.number }}. Set MCOMIX_FORK_PR: \"${{ github.event.pull_request.number }}\" in the manifest."
+            exit 1
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [check-manifest]
+    if: always() && (needs.check-manifest.result == 'success' || needs.check-manifest.result == 'skipped')
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint manifest
+        run: flatpak-builder-lint manifest io.github.bmfrosty.mcomix.yml
+      - name: Show expected install version
+        run: |
+          pinned=$(grep -A3 'url: https://github.com/bmfrosty/mcomix.git' \
+            io.github.bmfrosty.mcomix.yml | grep 'commit:' | awk '{print $2}')
+          manifest_pr=$(grep 'MCOMIX_FORK_PR:' io.github.bmfrosty.mcomix.yml | \
+            sed 's/.*MCOMIX_FORK_PR: *"\?\([0-9]*\)"\?.*/\1/')
+          base_ver=$(git show ${pinned}:mcomix/constants.py 2>/dev/null | \
+            sed -n "s/^VERSION = '\([^']*\)'/\1/p")
+          echo "Installed version will be: ${base_ver}+pr${manifest_pr}.${pinned:0:7}"
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: io.github.bmfrosty.mcomix.flatpak
+          manifest-path: io.github.bmfrosty.mcomix.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+      - name: Update repo summary for remote access
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: flatpak build-update-repo repo
+      - name: Upload repo artifact for deployment
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-repo
+          path: repo/
+
+  deploy:
+    needs: build
+    if: always() && needs.build.result == 'success' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Download repo artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flatpak-repo
+          path: repo
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
