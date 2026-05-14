@@ -79,7 +79,64 @@ def is_system_ui_dark_themed() -> constants.SystemThemeLightness:
         except OSError:
             return constants.SystemThemeLightness.UNKNOWN
     else:
+        return _detect_unix_dark_theme()
+
+
+def _detect_unix_dark_theme() -> constants.SystemThemeLightness:
+    """Detect dark theme preference on Linux/Unix.
+
+    Tries the XDG settings portal first (works in flatpak sandboxes and on
+    any desktop with a portal implementation), then falls back to reading
+    org.gnome.desktop.interface via GSettings (works on a GNOME desktop
+    outside a sandbox).
+
+    XDG appearance color-scheme values: 0=no-preference, 1=prefer-dark,
+    2=prefer-light.
+    """
+    try:
+        from gi.repository import GLib, Gio
+    except ImportError:
         return constants.SystemThemeLightness.UNKNOWN
+
+    # Primary: XDG settings portal via D-Bus
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        result = bus.call_sync(
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings",
+            "Read",
+            GLib.Variant("(ss)", ("org.freedesktop.appearance", "color-scheme")),
+            GLib.VariantType.new("(v)"),
+            Gio.DBusCallFlags.NONE,
+            1000,
+            None,
+        )
+        # The return type is (v); unwrap any number of nested v-typed variants
+        # to reach the actual uint32 value.
+        inner = result.get_child_value(0)
+        while inner.get_type_string() == "v":
+            inner = inner.get_variant()
+        color_scheme = inner.get_uint32()
+        if color_scheme == 1:
+            return constants.SystemThemeLightness.DARK
+        if color_scheme == 2:
+            return constants.SystemThemeLightness.LIGHT
+    except Exception:
+        pass
+
+    # Fallback: GSettings (GNOME desktop, outside flatpak)
+    try:
+        gsettings = Gio.Settings.new("org.gnome.desktop.interface")
+        color_scheme = gsettings.get_string("color-scheme")
+        if color_scheme == "prefer-dark":
+            return constants.SystemThemeLightness.DARK
+        if color_scheme == "prefer-light":
+            return constants.SystemThemeLightness.LIGHT
+    except Exception:
+        pass
+
+    return constants.SystemThemeLightness.UNKNOWN
 
 
 # vim: expandtab:sw=4:ts=4
