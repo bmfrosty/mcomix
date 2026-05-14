@@ -95,6 +95,7 @@ BINDING_INFO = {
     'rotate_90_height' : { 'title': _('Rotate 90 degrees CW'), 'group': _('Autorotate by height') },
     'rotate_270_height' : { 'title': _('Rotate 90 degrees CCW'), 'group': _('Autorotate by height') },
 
+    'continuous_scroll' : { 'title': _('Continuous scroll mode'), 'group': _('View mode') },
     'double_page' : { 'title': _('Double page mode'), 'group': _('View mode') },
     'manga_mode' : { 'title': _('Manga mode'), 'group': _('View mode') },
     'invert_scroll' : { 'title': _('Invert smart scroll'), 'group': _('View mode') },
