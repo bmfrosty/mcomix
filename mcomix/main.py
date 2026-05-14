@@ -42,6 +42,10 @@ from mcomix.i18n import _
 
 from typing import List
 
+# Number of pages before/after the current page to load in continuous scroll strip
+_CONTINUOUS_BEFORE = 1
+_CONTINUOUS_AFTER = 3
+
 
 class MainWindow(Gtk.Window):
 
@@ -62,6 +66,12 @@ class MainWindow(Gtk.Window):
         self.is_manga_mode = False
         self.previous_size = (None, None)
         self.was_out_of_focus = False
+        self._continuous_strip_pages = []
+        self._continuous_y_offsets = []
+        self._continuous_scaled_heights = []
+        self._continuous_adjusting = False
+        self._continuous_vadjust_handler = None
+        self._continuous_archive_direction = None  # 'next' or 'previous'
         #: Used to remember if changing to fullscreen enabled 'Hide all'
         self.hide_all_forced = False
         # Remember last scroll destination.
@@ -153,7 +163,10 @@ class MainWindow(Gtk.Window):
         table.attach(self.statusbar, 0, 3, 5, 6, Gtk.AttachOptions.FILL|Gtk.AttachOptions.SHRINK,
             Gtk.AttachOptions.FILL, 0, 0)
 
-        if prefs['default double page'] or double_page:
+        if prefs['continuous scroll']:
+            self.actiongroup.get_action('continuous_scroll').activate()
+
+        if (prefs['default double page'] or double_page) and not prefs['continuous scroll']:
             self.actiongroup.get_action('double_page').activate()
 
         if prefs['default manga mode'] or manga_mode:
@@ -382,6 +395,16 @@ class MainWindow(Gtk.Window):
 
         self.osd.clear()
 
+        # _continuous_adjusting suppresses _on_continuous_scroll for the
+        # duration of the render, including the synchronous value-changed that
+        # GTK fires inside set_size() before _continuous_strip_pages is updated.
+        if prefs['continuous scroll']:
+            self._continuous_adjusting = True
+            result = self._draw_image_continuous(scroll_to)
+            self._continuous_adjusting = False
+            self._waiting_for_redraw = False
+            return result
+
         if not self.filehandler.file_loaded:
             self._clear_main_area()
             self._waiting_for_redraw = False
@@ -549,6 +572,8 @@ class MainWindow(Gtk.Window):
             return ", ".join(info)
 
         filename = make_status(self.imagehandler.get_page_filename(double=double))
+        if filename is None:
+            return
         filesize = make_status(self.imagehandler.get_page_filesize(double=double))
         self.statusbar.set_page_number(page_number,
                                        self.imagehandler.get_number_of_pages(),
@@ -570,24 +595,51 @@ class MainWindow(Gtk.Window):
 
     def _page_available(self, page):
         """ Called whenever a new page is ready for displaying. """
-        # Refresh display when currently opened page becomes available.
-        current_page = self.imagehandler.get_current_page()
-        nb_pages = 2 if self.displayed_double() else 1
-        if current_page <= page < (current_page + nb_pages):
-            self.draw_image(scroll_to=self._last_scroll_destination)
-            self._update_page_information()
+        # In continuous scroll mode, redraw whenever any page in the visible
+        # strip becomes ready, not just the current page. The empty-strip
+        # fallback handles the first page of a newly opened archive before
+        # the strip has been built.
+        if prefs['continuous scroll']:
+            current_page = self.imagehandler.get_current_page()
+            if page in self._continuous_strip_pages or (
+                    not self._continuous_strip_pages and page == current_page):
+                self.draw_image(scroll_to=self._last_scroll_destination)
+                self._update_page_information()
+        else:
+            current_page = self.imagehandler.get_current_page()
+            nb_pages = 2 if self.displayed_double() else 1
+            if current_page <= page < (current_page + nb_pages):
+                self.draw_image(scroll_to=self._last_scroll_destination)
+                self._update_page_information()
 
         # Use first page as application icon when opening archives.
         if page == 1:
             self.update_icon(False)
 
     def _on_file_opened(self):
+        # Reset the strip on every archive open. Scroll destination is set from
+        # _continuous_archive_direction so that crossing into a previous archive
+        # lands at the bottom rather than the top.
+        if prefs['continuous scroll']:
+            self._continuous_strip_pages = []
+            self._continuous_y_offsets = []
+            self._continuous_scaled_heights = []
+            if self._continuous_archive_direction == 'previous':
+                self._last_scroll_destination = constants.SCROLL_TO_END
+            else:
+                self._last_scroll_destination = constants.SCROLL_TO_START
+            # Keep _continuous_archive_direction set until _draw_image_continuous
+            # successfully renders, so intermediate SCROLL_TO_START calls from
+            # set_page/new_page don't overwrite the intended destination.
         self.uimanager.set_sensitivities()
         number, count = self.filehandler.get_file_number()
         self.statusbar.set_file_number(number, count)
         self.statusbar.update()
 
     def _on_file_closed(self):
+        self._continuous_strip_pages = []
+        self._continuous_y_offsets = []
+        self._continuous_scaled_heights = []
         self.clear()
         self.thumbnailsidebar.hide()
         self.thumbnailsidebar.clear()
@@ -625,6 +677,8 @@ class MainWindow(Gtk.Window):
         self.slideshow.update_delay()
 
     def next_book(self):
+        if prefs['continuous scroll']:
+            self._continuous_archive_direction = 'next'
         archive_open = self.filehandler.archive_type is not None
         next_archive_opened = False
         if (self.slideshow.is_running() and \
@@ -640,6 +694,8 @@ class MainWindow(Gtk.Window):
             self.filehandler.open_next_directory()
 
     def previous_book(self):
+        if prefs['continuous scroll']:
+            self._continuous_archive_direction = 'previous'
         archive_open = self.filehandler.archive_type is not None
         previous_archive_opened = False
         if (self.slideshow.is_running() and \
@@ -731,6 +787,275 @@ class MainWindow(Gtk.Window):
         self.is_manga_mode = toggleaction.get_active()
         self._update_page_information()
         self.draw_image()
+
+    def change_continuous_scroll(self, toggleaction):
+        # Wire or unwire the vadjust signal that drives the continuous strip.
+        # Double-page mode is incompatible, so disable it when enabling this.
+        # Clearing the strip on disable prevents stale scroll events from firing
+        # against old strip data after the next draw_image uses the normal path.
+        prefs['continuous scroll'] = toggleaction.get_active()
+        if prefs['continuous scroll']:
+            self.actiongroup.get_action('double_page').set_active(False)
+            if self._continuous_vadjust_handler is None:
+                self._continuous_vadjust_handler = self._vadjust.connect(
+                    'value-changed', self._on_continuous_scroll)
+        else:
+            if self._continuous_vadjust_handler is not None:
+                self._vadjust.disconnect(self._continuous_vadjust_handler)
+                self._continuous_vadjust_handler = None
+            self._continuous_strip_pages = []
+        self._update_page_information()
+        self.draw_image()
+
+    def _draw_image_continuous(self, scroll_to):
+        """Render a vertical strip of pages for continuous scroll mode."""
+        if not self.filehandler.file_loaded:
+            self._clear_main_area()
+            return False
+
+        n_total = self.imagehandler.get_number_of_pages()
+        current_page = self.imagehandler.get_current_page()
+
+        if not current_page or not n_total:
+            return False
+
+        # If a direction-based scroll is pending from an archive transition,
+        # override any intermediate SCROLL_TO_START from set_page/new_page.
+        if self._continuous_archive_direction is not None:
+            scroll_to = (constants.SCROLL_TO_END
+                         if self._continuous_archive_direction == 'previous'
+                         else constants.SCROLL_TO_START)
+
+        if not self.imagehandler.page_is_available():
+            self._last_scroll_destination = scroll_to
+            for img in self.images:
+                img.hide()
+            self._show_scrollbars([False, False])
+            return False
+
+        # Build the page range: _CONTINUOUS_BEFORE pages before current,
+        # _CONTINUOUS_AFTER pages after, clamped to archive bounds.
+        first_page = max(1, current_page - _CONTINUOUS_BEFORE)
+        last_page = min(n_total, current_page + _CONTINUOUS_AFTER)
+        strip_pages = list(range(first_page, last_page + 1))
+        n_strip = len(strip_pages)
+
+        # Grow the image widget pool on demand; widgets are never removed,
+        # just hidden, to avoid GTK allocation churn.
+        while len(self.images) < n_strip:
+            img = Gtk.Image()
+            self._main_layout.put(img, 0, 0)
+            self.images.append(img)
+
+        vis_width, vis_height = self.get_visible_area_size()
+        if vis_width <= 0:
+            vis_width = 1
+        if vis_height <= 0:
+            vis_height = 1
+        # Scale every page to the same width: half the viewport height.
+        # This keeps the strip readable without filling the screen horizontally.
+        target_width = max(1, vis_height // 2)
+
+        scaled_pixbufs = []
+        y_offsets = []
+        scaled_heights = []
+        orig_sizes = []
+        y = 0
+
+        # Scale and transform each page, recording y positions as we go.
+        for i, page in enumerate(strip_pages):
+            if self.imagehandler.page_is_available(page):
+                pixbuf = self.imagehandler._get_pixbuf(page - 1)
+            else:
+                pixbuf = image_tools.MISSING_IMAGE_ICON
+
+            is_anim = image_tools.is_animation(pixbuf)
+
+            if prefs['auto rotate from exif'] and not is_anim:
+                img_rotation = image_tools.get_implied_rotation(pixbuf)
+            else:
+                img_rotation = 0
+            rotation = tools.compile_rotations(img_rotation, prefs['rotation'])
+
+            orig_w = pixbuf.get_width()
+            orig_h = pixbuf.get_height()
+            if tools.rotation_swaps_axes(rotation):
+                orig_w, orig_h = orig_h, orig_w
+
+            scale = target_width / orig_w if orig_w > 0 else 1.0
+            scaled_w = max(1, int(orig_w * scale))
+            scaled_h = max(1, int(orig_h * scale))
+
+            if not is_anim:
+                pixbuf = image_tools.fit_pixbuf_to_rectangle(
+                    pixbuf, [scaled_w, scaled_h], rotation)
+                if prefs['horizontal flip']:
+                    pixbuf = image_tools.flip_pixbuf(pixbuf, 0)
+                if prefs['vertical flip']:
+                    pixbuf = image_tools.flip_pixbuf(pixbuf, 1)
+                pixbuf = self.enhancer.enhance(pixbuf)
+
+            image_tools.set_from_pixbuf(self.images[i], pixbuf)
+            scaled_pixbufs.append(pixbuf)
+            y_offsets.append(y)
+            scaled_heights.append(scaled_h)
+            orig_sizes.append((orig_w, orig_h))
+            y += scaled_h
+
+        total_height = max(1, y) if n_strip > 0 else 1
+
+        # freeze_updates / thaw_updates suppresses GTK redraws while we
+        # reposition widgets, preventing visible tearing. Note: it does NOT
+        # suppress signal emission, so value-changed can still fire during
+        # set_size(); _continuous_adjusting guards against that.
+        self._main_layout.get_bin_window().freeze_updates()
+        self._main_layout.set_size(vis_width, total_height)
+
+        # Centre each image horizontally; hide unused pool widgets.
+        for i in range(n_strip):
+            actual_w = scaled_pixbufs[i].get_width()
+            x_off = max(0, (vis_width - actual_w) // 2)
+            self._main_layout.move(self.images[i], x_off, y_offsets[i])
+            self.images[i].show()
+
+        for i in range(n_strip, len(self.images)):
+            self.images[i].hide()
+
+        self._show_scrollbars([False, True])
+
+        # Update statusbar with the scale of the current page.
+        if current_page in strip_pages:
+            curr_idx = strip_pages.index(current_page)
+            ow, oh = orig_sizes[curr_idx]
+            if oh > 0:
+                curr_scale = scaled_heights[curr_idx] / oh
+                resolutions = ([ow, oh, curr_scale, False],)
+                self.statusbar.set_resolution(resolutions)
+        self.statusbar.set_page_number(current_page, n_total, 1)
+        self.statusbar.update()
+        self.update_title()
+
+        # Commit the new strip geometry so _on_continuous_scroll sees fresh data.
+        self._continuous_strip_pages = strip_pages
+        self._continuous_y_offsets = y_offsets
+        self._continuous_scaled_heights = scaled_heights
+
+        # Scroll to the requested position within the current page.
+        # SCROLL_TO_END shows the bottom edge; anything else shows the top.
+        if scroll_to is not None:
+            current_idx = strip_pages.index(current_page) if current_page in strip_pages else 0
+            current_y = y_offsets[current_idx]
+
+            if scroll_to == constants.SCROLL_TO_END:
+                new_vadjust = max(current_y,
+                    current_y + scaled_heights[current_idx] - vis_height)
+            else:
+                new_vadjust = current_y
+
+            max_vadjust = max(0, total_height - vis_height)
+            new_vadjust = max(0, min(max_vadjust, new_vadjust))
+            self._vadjust.set_value(new_vadjust)
+            self._hadjust.set_value(0)
+            # Archive direction has been consumed — clear it now.
+            self._continuous_archive_direction = None
+
+        self._main_layout.get_bin_window().thaw_updates()
+        return False
+
+    def _on_continuous_scroll(self, adjustment):
+        """Called when the viewport scrolls in continuous scroll mode."""
+        # _continuous_adjusting is True while we are programmatically moving
+        # the scroll position (strip rebuild, set_value, etc.).  Ignore those
+        # events to avoid re-entrant strip updates.
+        if self._continuous_adjusting or not self._continuous_strip_pages:
+            return
+        if not prefs['continuous scroll']:
+            return
+
+        scroll_y = adjustment.get_value()
+        vis_height = self.get_visible_area_size()[1]
+
+        # Determine which page occupies the top of the viewport: the last page
+        # whose y_offset is at or above the current scroll position.
+        visible_page = self._continuous_strip_pages[0]
+        for i, page in enumerate(self._continuous_strip_pages):
+            if scroll_y >= self._continuous_y_offsets[i]:
+                visible_page = page
+
+        first_in_strip = self._continuous_strip_pages[0]
+        last_in_strip = self._continuous_strip_pages[-1]
+        n_total = self.imagehandler.get_number_of_pages()
+
+        # Keep current_page in sync with what the user is actually looking at.
+        # _continuous_adjusting suppresses the value-changed re-entry that
+        # do_cacheing / page_changed may indirectly trigger.
+        current_page = self.imagehandler.get_current_page()
+        if visible_page != current_page:
+            self._continuous_adjusting = True
+            self.imagehandler._current_image_index = visible_page - 1
+            self.imagehandler.do_cacheing()
+            self._last_scroll_destination = None
+            self.page_changed()
+            self._continuous_adjusting = False
+
+        # Extend the strip when the viewport is approaching either edge.
+        # Lower edge: viewport bottom is past the start of the last strip page
+        # and there are more archive pages to append.
+        # Upper edge: viewport top is within the first strip page and there are
+        # archive pages to prepend.
+        viewport_bottom = scroll_y + vis_height
+        last_page_top = self._continuous_y_offsets[-1]
+        if (viewport_bottom >= last_page_top and last_in_strip < n_total
+                and not self._waiting_for_redraw):
+            self._schedule_strip_extend()
+        elif (scroll_y <= self._continuous_y_offsets[0] + self._continuous_scaled_heights[0]
+                and first_in_strip > 1
+                and not self._waiting_for_redraw):
+            self._schedule_strip_extend()
+
+    def _schedule_strip_extend(self):
+        """Schedule a strip re-render without blocking the scroll event."""
+        if not self._waiting_for_redraw:
+            self._waiting_for_redraw = True
+            GLib.idle_add(self._do_extend_strip, priority=GLib.PRIORITY_HIGH_IDLE)
+
+    def _do_extend_strip(self):
+        """Re-render the continuous strip, preserving exactly what's at the viewport top."""
+        # Snapshot the viewport-top reference BEFORE re-rendering.
+        # We record which page is at the top of the viewport and how many pixels
+        # into that page the scroll position sits.  After the strip is rebuilt we
+        # restore that same content to the same screen position, regardless of how
+        # much current_page may have drifted since _schedule_strip_extend() fired.
+        old_vadjust = self._vadjust.get_value()
+        ref_page = None
+        ref_offset = old_vadjust
+        if self._continuous_strip_pages and self._continuous_y_offsets:
+            ref_page = self._continuous_strip_pages[0]
+            ref_offset = old_vadjust
+            for i, page in enumerate(self._continuous_strip_pages):
+                if old_vadjust >= self._continuous_y_offsets[i]:
+                    ref_page = page
+                    ref_offset = old_vadjust - self._continuous_y_offsets[i]
+
+        # Hold _continuous_adjusting so that the set_size() call inside
+        # _draw_image_continuous doesn't fire _on_continuous_scroll re-entrantly.
+        self._continuous_adjusting = True
+        self._draw_image_continuous(None)
+
+        # Restore scroll so the reference page stays at the same screen position.
+        # If ref_page is no longer in the new strip (edge case), leave scroll as-is.
+        if ref_page is not None and ref_page in self._continuous_strip_pages:
+            ref_idx = self._continuous_strip_pages.index(ref_page)
+            new_vadjust = self._continuous_y_offsets[ref_idx] + ref_offset
+            if self._continuous_y_offsets and self._continuous_scaled_heights:
+                total_h = self._continuous_y_offsets[-1] + self._continuous_scaled_heights[-1]
+                vis_height = self.get_visible_area_size()[1]
+                max_vadjust = max(0, total_h - vis_height)
+                self._vadjust.set_value(max(0, min(max_vadjust, new_vadjust)))
+
+        self._continuous_adjusting = False
+        self._waiting_for_redraw = False
+        return False
 
     def change_invert_scroll(self, toggleaction):
         prefs['invert smart scroll'] = toggleaction.get_active()
@@ -824,6 +1149,8 @@ class MainWindow(Gtk.Window):
 
     def is_scrollable(self):
         """ Returns True if the current images do not fit into the viewport. """
+        if prefs['continuous scroll']:
+            return True
         if self.layout is None:
             return False
         return not all(tools.smaller_or_equal(self.layout.get_union_box().get_size(),
@@ -911,6 +1238,8 @@ class MainWindow(Gtk.Window):
 
     def displayed_double(self):
         """Return True if two pages are currently displayed."""
+        if prefs['continuous scroll']:
+            return False
         return (self.imagehandler.get_current_page() and
                 prefs['default double page'] and
                 not self.imagehandler.get_virtual_double_page() and

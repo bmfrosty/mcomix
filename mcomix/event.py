@@ -173,6 +173,10 @@ class EventHandler(object):
             self._window.actiongroup.get_action('fit_manual_mode').activate)
 
 
+        manager.register('continuous_scroll',
+            [],
+            self._window.actiongroup.get_action('continuous_scroll').activate)
+
         manager.register('manga_mode',
             ['m'],
             self._window.actiongroup.get_action('manga_mode').activate)
@@ -507,13 +511,19 @@ class EventHandler(object):
                 self._scroll_with_flipping(0, prefs['number of pixels to scroll per mouse wheel event'])
 
         elif direction == Gdk.ScrollDirection.RIGHT:
-            if not self._window.is_manga_mode:
+            # Horizontal scroll is a no-op in continuous scroll mode (vertical
+            # strip only). Manga mode logic below is unchanged from original.
+            if prefs['continuous scroll']:
+                pass
+            elif not self._window.is_manga_mode:
                 self._window.flip_page(+1)
             else:
                 self._previous_page_with_protection()
 
         elif direction == Gdk.ScrollDirection.LEFT:
-            if not self._window.is_manga_mode:
+            if prefs['continuous scroll']:
+                pass
+            elif not self._window.is_manga_mode:
                 self._previous_page_with_protection()
             else:
                 self._window.flip_page(+1)
@@ -552,7 +562,8 @@ class EventHandler(object):
 
             if event.x_root == self._pressed_pointer_pos_x and \
                 event.y_root == self._pressed_pointer_pos_y and \
-                not self._window.was_out_of_focus:
+                not self._window.was_out_of_focus and \
+                not prefs['continuous scroll']:
 
                 if event.get_state() & Gdk.ModifierType.SHIFT_MASK:
                     self._flip_page(10)
@@ -635,6 +646,27 @@ class EventHandler(object):
         to.
         """
 
+        # In continuous scroll mode the strip handles all vertical movement.
+        # If the strip can't scroll further and includes the first/last archive
+        # page, cross the archive boundary instead of flipping a page.
+        if prefs['continuous scroll']:
+            self._scroll_protection = True
+            if self._window.scroll(x, y):
+                self._extra_scroll_events = 0
+                return True
+            strip = self._window._continuous_strip_pages
+            n_total = self._window.imagehandler.get_number_of_pages()
+            # Manga mode reverses horizontal direction; vertical (y) is always
+            # the primary scroll axis. This mirrors the non-continuous path below.
+            if (y > 0 or (not self._window.is_manga_mode and x > 0)
+                    or (self._window.is_manga_mode and x < 0)):
+                if strip and strip[-1] >= n_total:
+                    self._next_page_with_protection()
+            else:
+                if strip and strip[0] <= 1:
+                    self._previous_page_with_protection()
+            return False
+
         self._scroll_protection = True
 
         if self._window.scroll(x, y):
@@ -674,6 +706,30 @@ class EventHandler(object):
         self._smart_scrolling(small_step, True)
 
     def _smart_scrolling(self, small_step, backwards):
+        # In continuous scroll mode, smart scroll is just a vertical scroll by
+        # a percentage of the viewport. Archive crossing works the same way as
+        # in _scroll_with_flipping: attempt scroll, then cross boundary if at end.
+        if prefs['continuous scroll']:
+            self._scroll_protection = True
+            viewport_size = self._window.get_visible_area_size()
+            if small_step is None:
+                step = prefs['smart scroll percentage'] * viewport_size[1]
+            else:
+                step = small_step
+            delta = -step if backwards else step
+            if self._window.scroll(0, delta):
+                self._extra_scroll_events = 0
+            else:
+                strip = self._window._continuous_strip_pages
+                n_total = self._window.imagehandler.get_number_of_pages()
+                if backwards:
+                    if strip and strip[0] <= 1:
+                        self._previous_page_with_protection()
+                else:
+                    if strip and strip[-1] >= n_total:
+                        self._next_page_with_protection()
+            return
+
         # Collect data from the environment
         viewport_size = self._window.get_visible_area_size()
         distance = prefs['smart scroll percentage']

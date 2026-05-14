@@ -111,6 +111,8 @@ class MainUI(Gtk.UIManager):
         self._actiongroup.add_toggle_actions([
             ('fullscreen', Gtk.STOCK_FULLSCREEN, _('_Fullscreen'),
                 None, _('Fullscreen mode'), window.change_fullscreen),
+            ('continuous_scroll', 'mcomix-continuous-scroll', _('_Continuous scroll mode'),
+                None, _('Continuous scroll mode'), window.change_continuous_scroll),
             ('double_page', 'mcomix-double-page', _('_Double page mode'),
                 None, _('Double page mode'), window.change_double_page),
             ('toolbar', None, _('_Toolbar'),
@@ -224,6 +226,7 @@ class MainUI(Gtk.UIManager):
                 <toolitem action="fit_size_mode" />
                 <toolitem action="fit_manual_mode" />
                 <separator />
+                <toolitem action="continuous_scroll" />
                 <toolitem action="double_page" />
                 <toolitem action="manga_mode" />
                 <separator />
@@ -259,6 +262,7 @@ class MainUI(Gtk.UIManager):
                 </menu>
                 <menu action="menu_view">
                     <menuitem action="fullscreen" />
+                    <menuitem action="continuous_scroll" />
                     <menuitem action="double_page" />
                     <menuitem action="manga_mode" />
                     <separator />
@@ -352,6 +356,7 @@ class MainUI(Gtk.UIManager):
                 </menu>
                 <menu action="menu_view_popup">
                     <menuitem action="fullscreen" />
+                    <menuitem action="continuous_scroll" />
                     <menuitem action="double_page" />
                     <menuitem action="manga_mode" />
                     <separator />
