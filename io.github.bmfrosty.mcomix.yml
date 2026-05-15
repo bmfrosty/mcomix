@@ -70,7 +70,7 @@ modules:
         # Overrides the FORK_PR read from the pinned source so the version
         # string reflects the PR that last changed the manifest, not the one
         # that last changed the app source.  Update this with each PR.
-        MCOMIX_FORK_PR: "22"
+        MCOMIX_FORK_PR: "24"
     build-commands:
       - pip3 install --verbose --exists-action=i --no-index --prefix=${FLATPAK_DEST}
         --no-build-isolation .[fileformats]
