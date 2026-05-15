@@ -237,13 +237,15 @@ class _SmbBrowserDialog(Gtk.Dialog):
         self._addr_entry.connect('activate', lambda _e: self._go_address())
         addr_box.pack_start(self._addr_entry, True, True, 6)
 
-        go_btn = Gtk.Button(label='Go')
-        go_btn.connect('clicked', lambda _b: self._go_address())
-        addr_box.pack_start(go_btn, False, False, 0)
-
+        # pack_end anchors these to the right edge so long URIs in the entry
+        # never push the buttons off screen.
         up_btn = Gtk.Button(label='↑ Up')
         up_btn.connect('clicked', lambda _b: self._go_parent())
-        addr_box.pack_start(up_btn, False, False, 4)
+        addr_box.pack_end(up_btn, False, False, 0)
+
+        go_btn = Gtk.Button(label='Go')
+        go_btn.connect('clicked', lambda _b: self._go_address())
+        addr_box.pack_end(go_btn, False, False, 4)
 
         right_box.pack_start(addr_box, False, False, 0)
 
