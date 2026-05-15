@@ -44,7 +44,7 @@ chmod +x "$BIN/mcomix"
 
 echo "==> Installing .desktop file..."
 mkdir -p "$SHARE/applications"
-sed "s|Exec=mcomix %f|Exec=$BIN/mcomix %f|" \
+sed "s|Exec=mcomix %u|Exec=$BIN/mcomix %u|" \
     "$REPO/share/applications/mcomix.desktop" \
     > "$SHARE/applications/mcomix.desktop"
 

@@ -1,5 +1,6 @@
 """archive_tools.py - Archive tool functions."""
 
+import hashlib
 import os
 import shutil
 import zipfile
@@ -69,6 +70,23 @@ _HANDLERS = {
         mobi.MobiArchive,
     ),
 }
+
+def archive_page_key(path: str) -> str:
+    """Return a stable content-addressed key for page memory.
+
+    Uses MD5 of the file so identical archives at different paths
+    (SMB copies, backups, mirrored collections) share one entry.
+    Falls back to abspath if the file is unreadable.
+    """
+    try:
+        h = hashlib.md5()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(1 << 20), b''):
+                h.update(chunk)
+        return f'md5:{h.hexdigest()}'
+    except OSError:
+        return os.path.abspath(path)
+
 
 def _get_handler(archive_type):
     """ Return best archive class for format <archive_type> """

@@ -302,15 +302,18 @@ class _LibraryBackend(object):
         supercollection: Optional[int] = cur.fetchone()
         return supercollection
 
-    def add_book(self, path: str, collection: Optional[int] = None) -> bool:
+    def add_book(self, path: str, collection: Optional[int] = None, key: str = None) -> bool:
         """Add the archive at <path> to the library. If <collection> is
         not None, it is the collection that the books should be put in.
+        If <key> is provided it is used as the DB path field instead of
+        abspath(path), allowing content-addressed storage (e.g. md5:...).
         Return True if the book was successfully added (or was already
         added).
         """
-        path = os.path.abspath(path)
-        name = os.path.basename(path)
-        info = archive_tools.get_archive_info(path)
+        real_path = os.path.abspath(path)
+        store_path = key if key is not None else real_path
+        name = os.path.basename(real_path)
+        info = archive_tools.get_archive_info(real_path)
         if info is None:
             return False
         format, pages, size = info
@@ -318,22 +321,22 @@ class _LibraryBackend(object):
         # Thumbnail for the newly added book will be generated once it
         # is actually needed with get_book_thumbnail().
         old = self._con.execute('''select id from Book
-            where path = ?''', (path,)).fetchone()
+            where path = ?''', (store_path,)).fetchone()
         try:
             cursor = self._con.cursor()
             if old is not None:
                 cursor.execute('''update Book set
                     name = ?, pages = ?, format = ?, size = ?
-                    where path = ?''', (name, pages, format, size, path))
+                    where path = ?''', (name, pages, format, size, store_path))
                 book_id = old
             else:
                 cursor.execute('''insert into Book
                     (name, path, pages, format, size)
                     values (?, ?, ?, ?, ?)''',
-                               (name, path, pages, format, size))
+                               (name, store_path, pages, format, size))
                 book_id = cursor.lastrowid
 
-                book = backend_types._Book(book_id, name, path, pages,
+                book = backend_types._Book(book_id, name, store_path, pages,
                                            format, size, datetime.datetime.now().isoformat())
                 self.book_added(book)
 
@@ -344,7 +347,7 @@ class _LibraryBackend(object):
 
             return True
         except dbapi2.Error:
-            log.error(_('! Could not add book "%s" to the library'), path)
+            log.error(_('! Could not add book "%s" to the library'), store_path)
             return False
 
     @callback.Callback
