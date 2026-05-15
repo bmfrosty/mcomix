@@ -58,6 +58,9 @@ class _BaseFileChooserDialog(Gtk.Dialog):
         self.vbox.pack_start(self.filechooser, True, True, 0)
         self.set_border_width(4)
         self.filechooser.set_border_width(6)
+        # Open wider than the hard minimum so SMB/network paths with long
+        # breadcrumbs don't push the parent-directory button off-screen.
+        self.set_default_size(960, 520)
         self.connect('response', self._response)
         self.filechooser.connect('file_activated', self._response,
             Gtk.ResponseType.OK)
