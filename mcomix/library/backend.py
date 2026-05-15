@@ -93,7 +93,8 @@ class _LibraryBackend(object):
         If the book doesn't exist, None is returned. Otherwise, a
         L{backend_types._Book} instance is returned. """
 
-        path = os.path.abspath(path)
+        if not path.startswith('md5:'):
+            path = os.path.abspath(path)
 
         cur = self.execute('''select id, name, path, pages, format,
                                      size, added
