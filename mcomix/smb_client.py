@@ -8,6 +8,8 @@ Public API (all paths use smb:// URIs):
     is_available()           -> bool
 """
 
+import re
+import socket
 import struct
 from typing import NamedTuple
 from urllib.parse import urlparse, unquote, quote
@@ -33,6 +35,20 @@ class DirEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 # URI <-> UNC conversion
 # ---------------------------------------------------------------------------
+
+_IP_RE = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
+
+
+def canonical_host(host: str) -> str:
+    """Normalize SMB hostname to IP via forward DNS so 'maxi' == '192.168.x.x'."""
+    host = host.lower()
+    if _IP_RE.match(host):
+        return host
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
 
 def _smb_uri_to_unc(uri: str):
     """Parse smb://host/share/sub/path and return (host, share, unc).

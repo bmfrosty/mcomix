@@ -70,6 +70,9 @@ class FileHandler(object):
         #: navigation can enumerate the remote parent directory instead of the
         #: local temp dir (which only ever contains the one downloaded file).
         self._source_uri = None
+        #: Content-addressed page-memory key (md5:<hex>) computed from the
+        #: archive file after it is opened, or None when no archive is open.
+        self._page_key = None
         #: Sliding window cache for remote directory navigation.
         #: Dict with keys: parent_uri, current_uri, prev (list, closest-first),
         #: next (list, closest-first), complete (bool — True means the lists cover
@@ -105,6 +108,18 @@ class FileHandler(object):
         if local:
             log.debug('_resolve_uri: resolved to local path=%s', local)
             return local
+        # For smb:// URIs, normalize the host to IP so both opening methods
+        # (file chooser returning 'maxi' vs Dolphin returning '192.168.x.x')
+        # produce the same canonical URI before any key is computed.
+        if path.startswith('smb://'):
+            from mcomix import smb_client as _sc_norm
+            from urllib.parse import urlparse as _urlparse, urlunparse as _urlunparse
+            _p = _urlparse(path)
+            _ip = _sc_norm.canonical_host(_p.hostname or '')
+            if _ip != (_p.hostname or ''):
+                path = _urlunparse((_p.scheme, _ip, _p.path, _p.params, _p.query, _p.fragment))
+                log.debug('_resolve_uri: normalized host to %s -> %s', _p.hostname, path)
+
         # For smb:// URIs, use smbprotocol directly.
         if path.startswith('smb://'):
             from mcomix import smb_client as _sc
@@ -205,6 +220,8 @@ class FileHandler(object):
                 self._window.osd.show(str(ex))
                 self.file_opened()
                 return False
+            self._page_key = archive_tools.archive_page_key(self._base_path)
+            log.debug('open_file: _page_key=%s', self._page_key)
             self.file_loading = True
         else:
             image_files, current_image_index = \
@@ -301,6 +318,7 @@ class FileHandler(object):
             self._comment_files = []
             self._name_table.clear()
             self._source_uri = None
+            self._page_key = None
             self.file_closed()
         # Catch up on UI events, so we don't leave idle callbacks.
         while Gtk.events_pending():
@@ -433,7 +451,7 @@ class FileHandler(object):
         elif start_page < 0 and not prefs['default double page']:
             current_image_index = num_of_pages - 1
         elif start_page == 0:
-            current_image_index = (self.last_read_page.get_page(path) or 1) - 1
+            current_image_index = (self.last_read_page.get_page(path, key=self._page_key) or 1) - 1
         else:
             current_image_index = start_page - 1
 
@@ -444,7 +462,7 @@ class FileHandler(object):
         that time, or from page 1. This method returns a page index, that is,
         index + 1. """
 
-        read_date = self.last_read_page.get_date(path)
+        read_date = self.last_read_page.get_date(path, key=self._page_key)
 
         dialog = message_dialog.MessageDialog(self._window, Gtk.DialogFlags.MODAL, Gtk.MessageType.INFO,
             Gtk.ButtonsType.YES_NO)
@@ -979,9 +997,9 @@ class FileHandler(object):
         # behaviour and would waste space unnecessarily)
         try:
             if page == 1:
-                self.last_read_page.clear_page(archive_path)
+                self.last_read_page.clear_page(archive_path, key=self._page_key)
             else:
-                self.last_read_page.set_page(archive_path, page)
+                self.last_read_page.set_page(archive_path, page, key=self._page_key)
         except ValueError:
             # The book no longer exists in the library and has been deleted
             pass

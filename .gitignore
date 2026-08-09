@@ -2,6 +2,7 @@ CLAUDE.md
 PLAN.md
 PLAN_TWO_FILE_PATHS.md
 PLAN_CLEAN_GIT.md
+PLAN_SMB_PAGE_MEMORY.md
 *.pyc
 __pycache__
 win32/*.nupkg
