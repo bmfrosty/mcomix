@@ -231,19 +231,20 @@ class _SmbBrowserDialog(Gtk.Dialog):
         addr_box.set_margin_start(4)
         addr_box.set_margin_bottom(2)
 
-        addr_box.pack_start(Gtk.Label(label='Location:'), False, False, 0)
-
-        self._addr_entry = Gtk.Entry(text=self._current_uri)
-        self._addr_entry.connect('activate', lambda _e: self._go_address())
-        addr_box.pack_start(self._addr_entry, True, True, 6)
+        up_btn = Gtk.Button(label='↑ Up')
+        up_btn.connect('clicked', lambda _b: self._go_parent())
+        addr_box.pack_start(up_btn, False, False, 0)
 
         go_btn = Gtk.Button(label='Go')
         go_btn.connect('clicked', lambda _b: self._go_address())
         addr_box.pack_start(go_btn, False, False, 0)
 
-        up_btn = Gtk.Button(label='↑ Up')
-        up_btn.connect('clicked', lambda _b: self._go_parent())
-        addr_box.pack_start(up_btn, False, False, 4)
+        addr_box.pack_start(Gtk.Label(label='Location:'), False, False, 0)
+
+        self._addr_entry = Gtk.Entry(text=self._current_uri)
+        self._addr_entry.set_width_chars(10)
+        self._addr_entry.connect('activate', lambda _e: self._go_address())
+        addr_box.pack_start(self._addr_entry, True, True, 0)
 
         right_box.pack_start(addr_box, False, False, 0)
 
@@ -298,6 +299,7 @@ class _SmbBrowserDialog(Gtk.Dialog):
         # Status bar
         self._status = Gtk.Label(label='Enter an smb:// address and press Go.',
                                  halign=Gtk.Align.START, xalign=0.0)
+        self._status.set_ellipsize(Pango.EllipsizeMode.END)
         self._status.set_margin_start(4)
         self._status.set_margin_top(2)
         self._status.set_margin_bottom(4)

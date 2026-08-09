@@ -53,21 +53,22 @@ class LastReadPage(object):
 
         return count
 
-    def set_page(self, path, page):
+    def set_page(self, path, page, key=None):
         """ Sets C{page} as last read page for the book at C{path}.
         @param path: Path to book. Raises ValueError if file doesn't exist.
         @param page: Page number.
+        @param key: Optional content-addressed DB key (overrides abspath).
         """
         if not self.enabled:
             return
 
-        full_path = os.path.abspath(path)
-        book = self.backend.get_book_by_path(full_path)
+        store_key = key if key is not None else os.path.abspath(path)
+        book = self.backend.get_book_by_path(store_key)
 
         if not book:
             self.backend.add_book(
-                full_path, self.backend.get_recent_collection().id)
-            book = self.backend.get_book_by_path(full_path)
+                path, self.backend.get_recent_collection().id, key=store_key)
+            book = self.backend.get_book_by_path(store_key)
 
             if not book:
                 raise ValueError("Book doesn't exist")
@@ -77,15 +78,16 @@ class LastReadPage(object):
 
         book.set_last_read_page(page)
 
-    def clear_page(self, path):
+    def clear_page(self, path, key=None):
         """ Removes stored page for book at C{path}.
         @param path: Path to book.
+        @param key: Optional content-addressed DB key (overrides abspath).
         """
         if not self.enabled:
             return
 
-        full_path = os.path.abspath(path)
-        book = self.backend.get_book_by_path(full_path)
+        store_key = key if key is not None else os.path.abspath(path)
+        book = self.backend.get_book_by_path(store_key)
 
         if book:
             book.set_last_read_page(None)
@@ -115,18 +117,19 @@ class LastReadPage(object):
                        (self.backend.get_recent_collection().id,))
         cursor.close()
 
-    def get_page(self, path):
+    def get_page(self, path, key=None):
         """ Gets the last read page for book at C{path}.
 
         @param path: Path to book.
+        @param key: Optional content-addressed DB key (overrides abspath).
         @return: Page that was last read, or C{None} if the book
                  wasn't opened before.
         """
         if not self.enabled:
             return None
 
-        full_path = os.path.abspath(path)
-        book = self.backend.get_book_by_path(full_path)
+        store_key = key if key is not None else os.path.abspath(path)
+        book = self.backend.get_book_by_path(store_key)
         if book:
             page = book.get_last_read_page()
             if page is not None and page < book.pages:
@@ -138,17 +141,18 @@ class LastReadPage(object):
         else:
             return None
 
-    def get_date(self, path):
+    def get_date(self, path, key=None):
         """ Gets the date at which the page for path was set.
 
         @param path: Path to book.
+        @param key: Optional content-addressed DB key (overrides abspath).
         @return: C{datetime} object, or C{None} if no page was set.
         """
         if not self.enabled:
             return None
 
-        full_path = os.path.abspath(path)
-        book = self.backend.get_book_by_path(full_path)
+        store_key = key if key is not None else os.path.abspath(path)
+        book = self.backend.get_book_by_path(store_key)
         if book:
             return book.get_last_read_date()
         else:
